@@ -1,0 +1,47 @@
+[
+  {
+    "id": "grok-cli", "legacy_id": "grok", "pool": "xai", "family": "grok",
+    "label": "Grok (xAI CLI 登录态；模型跟随 CLI 默认)", "agentic": true, "cost": "sub", "rank": 20,
+    "argv": ["grok", "-p", "{prompt}", "--output-format", "plain"], "extract": "stdout", "default_timeout": 900
+  },
+  {
+    "id": "codex-cli", "legacy_id": "codex", "pool": "openai", "family": "openai",
+    "label": "Codex (ChatGPT 账户额度；模型跟随 CLI 默认)", "agentic": true, "cost": "sub", "rank": 25,
+    "argv": ["codex", "exec", "--skip-git-repo-check", "-s", "read-only", "-o", "{outfile}", "{prompt}"], "extract": "last-message-file", "default_timeout": 900
+  },
+  {
+    "id": "agy-cli", "legacy_id": "agy", "pool": "google", "family": "gemini",
+    "label": "Gemini 3.8 Flash High (Antigravity CLI，Google 账户登录态)", "agentic": true, "cost": "sub", "rank": 10,
+    "argv": ["agy", "-p", "{prompt}", "--output-format", "text", "--model", "gemini-3.8-flash-high", "--dangerously-skip-permissions"], "extract": "stdout", "default_timeout": 2400
+  },
+  {
+    "id": "kimi-cli-default", "legacy_id": "kimi", "pool": "kimi-code", "family": "kimi",
+    "label": "Kimi Code (订阅 CLI；模型跟随 CLI 默认)", "agentic": true, "cost": "sub", "rank": 50,
+    "argv": ["kimi", "-p", "{prompt}", "--output-format", "stream-json"], "extract": "jsonl-assistant", "default_timeout": 900
+  },
+  {
+    "id": "kimi-k3-cli", "legacy_id": "kimi-k3", "pool": "kimi-code", "family": "kimi",
+    "label": "Kimi K3 (订阅 CLI，1M 上下文)", "agentic": true, "cost": "sub", "rank": 55,
+    "argv": ["kimi", "-m", "kimi-code/k3", "-p", "{prompt}", "--output-format", "stream-json"], "extract": "jsonl-assistant", "default_timeout": 2400
+  },
+  {
+    "id": "deepseek-pro-api", "legacy_id": "deepseek", "pool": "deepseek-api", "family": "deepseek",
+    "label": "DeepSeek v4 pro (API key，计费)", "agentic": false, "cost": "metered", "rank": 40,
+    "argv": [], "extract": "llm-json", "default_timeout": 900, "api_alias": "deepseek-pro"
+  },
+  {
+    "id": "glm-api", "legacy_id": "glm", "pool": "zhipu", "family": "glm",
+    "label": "GLM (智谱 API key，计费)", "agentic": false, "cost": "metered", "rank": 30,
+    "argv": [], "extract": "llm-json", "default_timeout": 900, "api_alias": "glm"
+  },
+  {
+    "id": "kimi-k3-api", "legacy_id": "kimi-k3-api", "pool": "moonshot-api", "family": "kimi",
+    "label": "Kimi K3 (Moonshot API key，计费；与 CLI 不同额度池)", "agentic": false, "cost": "metered", "rank": 60,
+    "argv": [], "extract": "llm-json", "default_timeout": 900, "api_alias": "kimi-k3"
+  },
+  {
+    "id": "claude-deepseek-cli", "legacy_id": "claude-ds", "pool": "deepseek-api", "family": "deepseek",
+    "label": "DeepSeek (Claude Code 壳，agentic，计费)", "agentic": true, "cost": "metered", "rank": 45,
+    "argv": ["{home}/.claude/bin/claude-ds", "-p", "{prompt}", "--dangerously-skip-permissions"], "extract": "stdout", "default_timeout": 900
+  }
+]

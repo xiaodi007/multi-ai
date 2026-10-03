@@ -1,0 +1,391 @@
+use crate::{args::Args, config::Config, runtime};
+use anyhow::{Context, Result, bail};
+use clap::{Arg, Command};
+use serde_json::{Value, json};
+use std::{
+    fs,
+    io::Write,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
+
+#[derive(Debug)]
+pub struct UsageError(pub String);
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for UsageError {}
+fn parse_args(tokens: &[String]) -> Result<Args> {
+    Args::parse(tokens).map_err(|error| UsageError(error.to_string()).into())
+}
+fn validate_review_args(command: &str, args: &Args) -> Result<()> {
+    let common = &["help", "json", "quiet"];
+    let specific: &[&str] = match command {
+        "run" => &[
+            "prompt-file",
+            "prompt",
+            "cwd",
+            "out",
+            "timeout",
+            "input",
+            "text-ready",
+            "idle-timeout",
+            "headers-timeout",
+            "max-tokens",
+            "resume",
+            "source-id",
+            "ignore-cooldown",
+        ],
+        "review" | "dispatch" => &[
+            "prompt-file",
+            "prompt",
+            "kind",
+            "seats",
+            "only",
+            "exclude",
+            "agentic",
+            "no-metered",
+            "dry-run",
+            "cwd",
+            "outdir",
+            "timeout",
+            "input",
+            "text-ready",
+            "idle-timeout",
+            "headers-timeout",
+            "max-tokens",
+            "resume",
+            "source-id",
+            "no-quota",
+        ],
+        "verify" => &[
+            "findings",
+            "by",
+            "exclude",
+            "cwd",
+            "out",
+            "timeout",
+            "input",
+            "text-ready",
+            "idle-timeout",
+            "headers-timeout",
+            "max-tokens",
+            "resume",
+            "source-id",
+            "no-metered",
+            "no-quota",
+        ],
+        "probe" => &["only", "timeout"],
+        "usage" | "status" => &[],
+        "reset" => &["all"],
+        "routes" => &[],
+        "doctor" => &["live", "only", "timeout"],
+        "feedback" => &[
+            "run",
+            "report",
+            "source",
+            "human-confirmed",
+            "accepted",
+            "false-positive",
+            "duplicate",
+            "uncertain",
+            "screen-min",
+            "rework-min",
+            "evidence",
+        ],
+        "install-config" => &["from"],
+        _ => return Ok(()),
+    };
+    for key in args.values.keys().chain(args.flags.iter()) {
+        if !common.contains(&key.as_str()) && !specific.contains(&key.as_str()) {
+            return Err(UsageError(format!("Unknown argument --{key} for {command}")).into());
+        }
+    }
+    if command == "run" && args.positional.is_empty() {
+        return Err(UsageError("run requires a route".into()).into());
+    }
+    if command == "verify" && !args.has("findings") {
+        return Err(UsageError("verify requires --findings FILE".into()).into());
+    }
+    Ok(())
+}
+
+fn help_app() -> Command {
+    let mut app=Command::new("multi-ai").version(env!("CARGO_PKG_VERSION"))
+        .disable_help_subcommand(true)
+        .about("Rust 原生多 AI 工具：明确通路、并行复核、可追溯报告")
+        .after_help("API 本体不依赖 Python/Node；CLI 通路按需安装登录。\n旧 ai-review / llm-run 入口保留语义。help/routes/doctor 默认离线。");
+    for (name, about) in [
+        ("run", "指定通路；--timeout 单位秒"),
+        (
+            "review",
+            "并行复核；--kind review|explore|verify；按额度池备援",
+        ),
+        ("dispatch", "review 的兼容同义入口"),
+        ("verify", "复核 --findings FILE"),
+        ("text", "llm-run 原生文本功能；--timeout-ms 单位毫秒"),
+        ("routes", "离线通路与模型来源；--json"),
+        ("doctor", "离线配置与依赖检查；--live 才探测"),
+        (
+            "feedback",
+            "按报告代录反馈；--run ID --report ID --evidence TEXT",
+        ),
+        ("probe", "显式探测通路并调用模型"),
+        ("usage", "查看已有账户额度"),
+        ("status", "查看冷却，不代表已经验证健康"),
+        ("reset", "清指定额度池冷却"),
+        ("install-config", "导入配置，不覆盖已有文件、不复制凭据"),
+        ("help", "离线帮助"),
+    ] {
+        app = app.subcommand(
+            Command::new(name).about(about).arg(
+                Arg::new("arguments")
+                    .num_args(0..)
+                    .trailing_var_arg(true)
+                    .allow_hyphen_values(true),
+            ),
+        );
+    }
+    app
+}
+fn print_help(topic: Option<&str>, legacy: Option<&str>) -> Result<()> {
+    let mut app = help_app();
+    if let Some(topic) = topic {
+        let topic = if topic == "dispatch" { "review" } else { topic };
+        if let Some(sub) = app.find_subcommand_mut(topic) {
+            sub.print_long_help()?;
+        } else {
+            app.print_long_help()?;
+        }
+    } else {
+        app.print_long_help()?;
+    }
+    println!();
+    if legacy == Some("llm-run") || topic == Some("text") {
+        println!(
+            "文本接口：\n  multi-ai text <alias> [prompt] --input FILE --out FILE [--json]\n  multi-ai text run --task NAME [--domain NAME] --input FILE\n  multi-ai text dispatch --domain NAME [--kind review|map|debate] --input FILE\n  multi-ai text profiles|domains|aliases [--json]\n  multi-ai text list-models [--json]  # 联网，需凭据\n\n--input 可重复，--input - 接收stdin；--image支持png/jpg/webp。\n--thinking auto|on|off，--effort low|high|max，--max-tokens N。\n--timeout-ms / --headers-timeout-ms / --idle-timeout-ms 单位毫秒。\n--stream / --no-stream；--quiet；--legacy。\n--resume 需 --out，同身份完整结果才复用；非Git恢复需 --source-id。\nstdout完整正文或JSON；stderr进度；partial不证明成功。"
+        );
+    } else {
+        println!(
+            "示例：\n  multi-ai routes --json\n  multi-ai run kimi-k3-cli --prompt-file evidence.md --cwd /path/to/repo --out review.md\n  multi-ai review --input evidence.md --text-ready --outdir reviews --seats 2\n  multi-ai verify --findings review.md --cwd /path/to/repo --out verify.md\n  multi-ai text glm --input evidence.md --out answer.md\n\nrun/review/verify：--timeout、--headers-timeout、--idle-timeout 单位秒。\n--only ROUTE… / --exclude ROUTE…；--no-metered；--agentic；--resume。\nAPI只读实际附带的正文，不能读取cwd路径；客户原件仅在明确授权范围使用。\n反馈：multi-ai feedback --run UUID --report ATTEMPT-ID --accepted N --evidence TEXT\n  [--false-positive N --duplicate N --uncertain N --screen-min N --rework-min N]\n默认source=agent；人工决定需 --source human --human-confirmed 与明确用户证据。\n顺序复用自动保留历史；同输出并发立即失败；旧引擎缓存失配可能重新请求。\nreview --dry-run 保留额度采集行为；需要纯离线检查使用 routes 或 doctor。"
+        );
+    }
+    Ok(())
+}
+fn find_executable(command: &str, config: &Config) -> Option<PathBuf> {
+    let candidates = if command.contains('/') {
+        vec![PathBuf::from(command)]
+    } else {
+        config
+            .environment()
+            .get("PATH")
+            .map(|s| std::env::split_paths(s).map(|p| p.join(command)).collect())
+            .unwrap_or_default()
+    };
+    candidates
+        .into_iter()
+        .find(|p| p.is_file() && fs::metadata(p).is_ok_and(|m| m.permissions().mode() & 0o111 != 0))
+}
+fn doctor(config: &Config, args: &Args) -> Result<i32> {
+    let mut rows = Vec::new();
+    let only = args.all("only");
+    for name in &only {
+        config.route(name, false)?;
+    }
+    for route in &config.routes {
+        if !only.is_empty() && !only.contains(&route.id) {
+            continue;
+        }
+        let mut row =
+            json!({"route":route.id,"pool":route.pool,"family":route.family,"live_checked":false});
+        if let Some(alias) = &route.api_alias {
+            let meta = config.alias_metadata(alias, &Args::default())?;
+            let provider = meta["provider"].as_str().context("provider missing")?;
+            let available = !config.first_key(config.provider(provider)?).1.is_empty();
+            row["kind"] = json!("api");
+            row["credentials_configured"] = json!(available);
+            row["ready_to_attempt"] = json!(available);
+        } else {
+            let executable = route.argv.first().context("missing route executable")?;
+            let available = find_executable(executable, config).is_some();
+            row["kind"] = json!("cli");
+            row["executable_available"] = json!(available);
+            row["login_verified"] = json!(false);
+            row["ready_to_attempt"] = json!(available);
+        }
+        rows.push(row);
+    }
+    let value = json!({"engine":"multi-ai-rust","version":env!("CARGO_PKG_VERSION"),"platform":format!("{}-{}",std::env::consts::OS,std::env::consts::ARCH),
+        "offline":true,"python_node_required":false,"routes":rows});
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(0)
+}
+fn install_config(args: &Args) -> Result<i32> {
+    let directory = std::env::var_os("MULTI_AI_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| runtime::home().join(".config/multi-ai"));
+    runtime::private_dir(&directory)?;
+    let profiles = if let Some(path) = args.get("from") {
+        let value =
+            fs::read_to_string(path).with_context(|| format!("read configuration {path}"))?;
+        let parsed: Value = serde_json::from_str(&value)?;
+        if !parsed["providers"].is_object() || !parsed["aliases"].is_object() {
+            bail!("source is not a model profile configuration");
+        }
+        value
+    } else {
+        include_str!("../config/profiles.json").into()
+    };
+    let mut created = Vec::new();
+    let mut skipped = Vec::new();
+    for (name, content) in [
+        ("profiles.json", profiles.as_str()),
+        ("routes.json", include_str!("../config/routes.json")),
+    ] {
+        let path = directory.join(name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(content.as_bytes())?;
+                file.sync_all()?;
+                created.push(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => skipped.push(path),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(
+            &json!({"created":created,"preserved":skipped,"credentials_copied":false})
+        )?
+    );
+    Ok(0)
+}
+
+pub async fn main_entry(argv: Vec<String>) -> Result<i32> {
+    let executable = argv
+        .first()
+        .and_then(|p| Path::new(p).file_name())
+        .and_then(|p| p.to_str())
+        .unwrap_or("multi-ai");
+    let legacy = match executable {
+        "ai-review" => Some("ai-review"),
+        "llm-run" => Some("llm-run"),
+        _ => None,
+    };
+    let tokens = &argv[1..];
+    if tokens
+        .first()
+        .is_some_and(|s| s == "--version" || s == "-V")
+    {
+        println!(
+            "multi-ai {} (Rust native, macOS arm64 first release)",
+            env!("CARGO_PKG_VERSION")
+        );
+        return Ok(0);
+    }
+    if tokens.is_empty() || tokens[0] == "help" || tokens[0] == "--help" || tokens[0] == "-h" {
+        print_help(tokens.get(1).map(String::as_str), legacy)?;
+        return Ok(0);
+    }
+    if legacy == Some("llm-run") {
+        let command = &tokens[0];
+        let raw = &tokens[1..];
+        let args = if ["codex", "grok"].contains(&command.as_str()) {
+            Args {
+                raw: raw.to_vec(),
+                ..Args::default()
+            }
+        } else {
+            parse_args(raw)?
+        };
+        if args.has("help") {
+            print_help(Some("text"), legacy)?;
+            return Ok(0);
+        }
+        return crate::api::text_command(&Config::load()?, command, &args).await;
+    }
+    let command = &tokens[0];
+    if command == "text" {
+        let sub = tokens.get(1).map(String::as_str).unwrap_or("help");
+        let raw = if tokens.len() > 1 { &tokens[2..] } else { &[] };
+        let args = if ["codex", "grok"].contains(&sub) {
+            Args {
+                raw: raw.to_vec(),
+                ..Args::default()
+            }
+        } else {
+            parse_args(raw)?
+        };
+        if sub == "help" || args.has("help") {
+            print_help(Some("text"), None)?;
+            return Ok(0);
+        }
+        return crate::api::text_command(&Config::load()?, sub, &args).await;
+    }
+    let args = parse_args(&tokens[1..])?;
+    if args.has("help") {
+        print_help(Some(command), legacy)?;
+        return Ok(0);
+    }
+    validate_review_args(command, &args)?;
+    if command == "install-config" {
+        return install_config(&args);
+    }
+    if command == "feedback" {
+        return runtime::feedback_command(&args);
+    }
+    let config = Config::load()?;
+    match command.as_str() {
+        "routes" => {
+            let value = config.public_routes()?;
+            if args.has("json") {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!(
+                    "{:<24} {:<17} {:<13} MODEL / SOURCE",
+                    "ROUTE", "POOL", "FAMILY"
+                );
+                for route in value.as_array().context("route list is not an array")? {
+                    println!(
+                        "{:<24} {:<17} {:<13} {} / {}",
+                        route["id"].as_str().unwrap_or("?"),
+                        route["pool"].as_str().unwrap_or("?"),
+                        route["family"].as_str().unwrap_or("?"),
+                        route["model"].as_str().unwrap_or("unknown"),
+                        route["model_source"].as_str().unwrap_or("CLI default")
+                    );
+                }
+            }
+            Ok(0)
+        }
+        "doctor" => {
+            if args.has("live") {
+                crate::review::command(&config, "probe", &args, legacy.is_some()).await
+            } else {
+                doctor(&config, &args)
+            }
+        }
+        "run" | "review" | "dispatch" | "verify" | "probe" | "usage" | "status" | "reset" => {
+            crate::review::command(
+                &config,
+                if command == "review" {
+                    "dispatch"
+                } else {
+                    command
+                },
+                &args,
+                legacy.is_some(),
+            )
+            .await
+        }
+        _ => bail!("Unknown command: {command}. Use multi-ai help."),
+    }
+}

@@ -1,0 +1,474 @@
+{
+  "lastRefreshed": "2026-08-27",
+  "docs": {
+    "deepseek": "https://api-docs.deepseek.com/api/create-chat-completion",
+    "kimi-k2": "https://platform.kimi.ai/docs/guide/use-kimi-k2-thinking-model",
+    "kimi-k3": "https://platform.kimi.com/docs/models",
+    "glm": "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3"
+  },
+  "namingNotes": [
+    "OpenAI-compat DeepSeek ids are exactly deepseek-v4-flash and deepseek-v4-pro — no [1m] suffix.",
+    "api.moonshot.cn hosts three wire protocols: kimi (K2.x thinking param), kimi-k3 (reasoning_effort + stream), moonshot (V1, no thinking). moonshot-v1 and kimi-k2.5 sunset 2026-08-31.",
+    "GLM-5.3 always thinks (cannot disable). GLM-5.3-Flash is the cheap multimodal default for third-opinion and vision."
+  ],
+  "capabilityClasses": {
+    "agentic-explore": {
+      "adapter": "host-explore",
+      "llmRun": false,
+      "instruction": "Do not call a text model to explore the repo. Use host tools directly for small searches/counts; available read-only subagents for large separable searches can return paths, excerpts and coverage limits. Answer from sufficient evidence; map/review is optional, never an automatic next step or default roundtable. Do not nest codex exec or an agent merely to run llm-run. Any printed After the evidence packet command is an optional suggestion, not a required call."
+    },
+    "text-fast": { "adapter": "llm-run", "llmRun": true },
+    "text-reason": { "adapter": "llm-run", "llmRun": true },
+    "web": {
+      "adapter": "host-web",
+      "llmRun": false,
+      "instruction": "Use the current host's web search or browser for current facts; a text-model response is not a live source. If the host's web channel is unavailable, use another available search/browser tool and verify primary sources. Do not call llm-run for a web search or assume text models have retrieved current facts."
+    },
+    "vision": { "adapter": "llm-run", "llmRun": true },
+    "local-private": {
+      "adapter": "local-qwen",
+      "llmRun": false,
+      "instruction": "This route remains local-only (local qwen); do not call an API through private. Do not proactively collect or send customer originals. If the maintainer explicitly specifies material for external processing, use an explicit external route for that material only, without repeated confirmation or a separate desensitization audit. Protect credentials and keep customer originals out of project Git. Existing heuristic overrides are per authorized call only, never persistent."
+    },
+    "host": {
+      "adapter": "host-self",
+      "llmRun": false,
+      "instruction": "Do this in the current session. Do not delegate writing code or DOM verification to a cheaper model."
+    }
+  },
+  "domains": {
+    "explore": {
+      "class": "agentic-explore",
+      "description": "仓库探索 / 引用面 / 数字盘点。纯文本模型看不见仓库。"
+    },
+    "doc-code": {
+      "class": "agentic-explore",
+      "followupTask": "review",
+      "description": "文档↔代码一致性。先 explore 打证据包，再 review。"
+    },
+    "product": {
+      "class": "text-reason",
+      "task": "red-team",
+      "roundtable": "product",
+      "description": "产品 / 业务规则 / 领域模型对抗"
+    },
+    "frontend": {
+      "class": "text-reason",
+      "task": "think-k3",
+      "roundtable": "product",
+      "description": "前端 / 界面 idea"
+    },
+    "backend": {
+      "class": "text-reason",
+      "task": "code-review",
+      "roundtable": "code",
+      "description": "后端 / 契约 / SQL 评审"
+    },
+    "security": {
+      "class": "text-reason",
+      "task": "code-review",
+      "description": "安全 / 漏洞挑刺。官方宣传当假设，结论须本机复现。"
+    },
+    "snippet": {
+      "class": "text-fast",
+      "task": "code-review",
+      "provider": "kimi",
+      "model": "kimi-k2.7-code",
+      "description": "代码片段二看"
+    },
+    "extract": {
+      "class": "text-fast",
+      "task": "extract",
+      "description": "长文压缩 / 结构化抽取"
+    },
+    "writing": {
+      "class": "text-reason",
+      "task": "think-k3",
+      "description": "中文长文 / 文案"
+    },
+    "web": {
+      "class": "web",
+      "description": "最新事实 / 版本号"
+    },
+    "vision": {
+      "class": "vision",
+      "task": "vision-review",
+      "description": "截图 / UI 闭环"
+    },
+    "private": {
+      "class": "local-private",
+      "description": "客户真名 / 金额 / 合同"
+    },
+    "implement": {
+      "class": "host",
+      "description": "主会话写代码 / DOM 验收"
+    }
+  },
+  "prompts": {
+    "outputSkeleton": "必须按以下标题输出，缺一不可。不知道就写「材料未给出」或「未核实」，禁止补全材料外事实。引用用材料原句，不改写当证据。材料日期之后的事实必须标「未核实」。\n\n## 结论\n## 已确认（材料内 / 需外核实）\n## 假设与未决\n## 风险（严重度）\n## 与材料的分歧（若推翻，写为什么）\n## 下一步",
+    "system": {
+      "summarize": "你是忠实压缩器，不是产品负责人。只保留材料里的关键事实、结论和待验证风险。材料没有的一律不写。用中文。",
+      "extract": "你是结构化抽取器。只输出材料里有的信息，按清晰结构组织。不要补充、不要推理材料外事实。不确定标「材料未给出」。用中文。",
+      "review": "你是技术/产品评审员。每条发现必须带：严重度、材料原句摘录、建议。允许指出遗漏，但把遗漏标成「材料未覆盖」而不是事实。用中文。",
+      "think": "你是深度分析员。给出推理后的结论、关键不确定性和可执行建议。允许质疑材料，但知识截止日期之后的事实必须标「未核实」。用中文。",
+      "think-k3": "你是对抗性评审。允许推翻材料中的观点，但必须写清依据。不知道就写不知道。禁止把流畅空话当成分析。用中文。",
+      "third-opinion": "你是没看过其他模型答案的独立第三方。先给自己的结论，再挑错和补风险。禁止附和一份不存在的「主流意见」。引用必须是材料原句。用中文。",
+      "map": "材料是 grep/读文件得到的证据包，不是完整仓库。根据摘录画出模块关系、调用链、文件职责。禁止发明材料中没出现的路径或符号。用中文。",
+      "explore-review": "材料是探索子 agent 的证据包（路径+摘录）。按摘录评审，不要假装读过完整文件。每条发现带路径和原句。用中文。",
+      "code-review": "你是代码评审员。只根据给出的代码/摘录发言。每条发现输出：file、severity（blocker/major/minor）、quote（原句）、suggestion。不要写没有摘录支撑的「可能」。用中文。",
+      "verify": "你只判断材料能否支撑该主张。输出第一行必须是 CONFIRMED 或 REFUTED 或 UNKNOWN，随后一行出处或缺失说明。不要补充材料外的世界知识。",
+      "vision-review": "你根据附带的图像做界面/截图评审。图像里没有的不要编。用中文。",
+      "red-team": "你是红队。默认立场是材料可能错。允许推翻。每条攻击要有材料内证据或明确标「推测」。用中文。"
+    },
+    "seats": {
+      "builder": "你只负责可执行方案：怎么落地、取舍、下一步。不要写空泛原则。用中文。",
+      "adversary": "你只负责找漏洞、推翻、标未决。不要给建设性路线图，除非它能用来攻击方案。用中文。",
+      "alt": "你给出与材料不同的拆法或归属。禁止重复前两家会说的正确废话。用中文。",
+      "correctness": "你只审正确性与安全：并发、权限、状态、错误路径。每条带摘录。用中文。",
+      "maintainability": "你只审可维护性：命名、重复、测试缺口、调用约定。每条带摘录。用中文。",
+      "contract": "你只审契约与边界：输入输出形状、错误码、字段归属、是否越权写入。每条带摘录。用中文。"
+    }
+  },
+  "providers": {
+    "deepseek": {
+      "displayName": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "chatPath": "/chat/completions",
+      "modelsPath": "/models",
+      "keyEnv": ["DEEPSEEK_API_KEY"],
+      "models": {
+        "fast": "deepseek-v4-flash",
+        "pro": "deepseek-v4-pro",
+        "reasoning": "deepseek-v4-pro",
+        "long": "deepseek-v4-flash"
+      },
+      "modelEnv": {
+        "fast": "DEEPSEEK_CHAT_MODEL",
+        "pro": "DEEPSEEK_REASONER_MODEL",
+        "reasoning": "DEEPSEEK_THINKING_MODEL",
+        "long": "DEEPSEEK_CHAT_MODEL"
+      },
+      "temperature": 0.2,
+      "maxTokens": 4000,
+      "thinking": {
+        "supported": true,
+        "default": "off",
+        "effortSupported": true,
+        "defaultEffort": "high",
+        "effortValues": ["high", "max"]
+      },
+      "notes": [
+        "Valid API ids: deepseek-v4-flash, deepseek-v4-pro (Pro checkpoint 0813, Flash 0731).",
+        "Flash is the default compressor. Pro wins on actionable long-doc distillation and hard format constraints.",
+        "Neither model knows post-mid-2025 facts. Flash fabricates dated 2026 events. Route freshness to host web or Codex."
+      ]
+    },
+    "kimi": {
+      "displayName": "Kimi K2.x",
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "chatPath": "/chat/completions",
+      "modelsPath": "/models",
+      "keyEnv": ["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+      "models": {
+        "fast": "kimi-k2.7-code-highspeed",
+        "pro": "kimi-k2.7-code",
+        "reasoning": "kimi-k2.7-code",
+        "long": "kimi-k2.7-code",
+        "coding": "kimi-k2.7-code"
+      },
+      "modelEnv": {
+        "fast": "KIMI_CODE_FAST_MODEL",
+        "pro": "KIMI_CODE_MODEL",
+        "reasoning": "KIMI_CODE_MODEL",
+        "long": "KIMI_CODE_MODEL",
+        "coding": "KIMI_CODE_MODEL"
+      },
+      "temperature": null,
+      "maxTokens": 8000,
+      "thinking": {
+        "supported": true,
+        "default": "auto",
+        "effortSupported": false
+      },
+      "alwaysThinkingModels": ["^kimi-k2\\.7-code"],
+      "modelGuard": {
+        "rejectPattern": "^kimi-k3",
+        "mismatchProvider": "kimi-k3",
+        "reason": "K3 must not receive the K2.x thinking param, and must stream at high/max effort"
+      },
+      "notes": [
+        "K2.7 Code only accepts thinking.type=enabled (verified 2026-08-28). Runner forces enabled and does not send reasoning_effort.",
+        "K2.6 is legacy (empty content on broad prompts). kimi-k2.5 and moonshot-v1 sunset 2026-08-31."
+      ]
+    },
+    "kimi-k3": {
+      "displayName": "Kimi K3",
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "chatPath": "/chat/completions",
+      "modelsPath": "/models",
+      "keyEnv": ["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+      "models": {
+        "fast": "kimi-k3",
+        "pro": "kimi-k3",
+        "reasoning": "kimi-k3",
+        "long": "kimi-k3"
+      },
+      "modelEnv": {
+        "reasoning": "KIMI_K3_MODEL"
+      },
+      "temperature": null,
+      "maxTokens": 20000,
+      "reasoningStyle": "k3",
+      "reasoning": {
+        "alwaysOn": true,
+        "effortTopLevel": true,
+        "defaultEffort": "max",
+        "effortValues": ["low", "high", "max"],
+        "streamForEfforts": ["high", "max"]
+      },
+      "modelGuard": {
+        "requirePattern": "^kimi-k3",
+        "mismatchProvider": "kimi",
+        "reason": "only kimi-k3* accepts top-level reasoning_effort; K2.x needs the thinking param"
+      },
+      "visionModels": ["^kimi-k3"],
+      "notes": [
+        "Buy perspective, not savings. high/max must stream. Budget minutes. Native vision — vision-review may use it."
+      ]
+    },
+    "moonshot": {
+      "displayName": "Moonshot V1 (sunset 2026-08-31)",
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "chatPath": "/chat/completions",
+      "modelsPath": "/models",
+      "keyEnv": ["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+      "sunset": "2026-08-31",
+      "models": {
+        "fast": "moonshot-v1-8k",
+        "pro": "moonshot-v1-32k",
+        "reasoning": "moonshot-v1-32k",
+        "long": "moonshot-v1-32k"
+      },
+      "modelEnv": {
+        "fast": "KIMI_LEGACY_MODEL",
+        "pro": "KIMI_LONG_MODEL",
+        "reasoning": "KIMI_LONG_MODEL",
+        "long": "KIMI_LONG_MODEL"
+      },
+      "temperature": 0.2,
+      "maxTokens": 4000,
+      "thinking": {
+        "supported": false,
+        "default": "off",
+        "effortSupported": false
+      },
+      "notes": [
+        "DEAD after 2026-08-31. Compression replacement: deepseek-v4-flash. Extraction with judgment: kimi-k3-low."
+      ]
+    },
+    "glm": {
+      "displayName": "GLM",
+      "baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "chatPath": "/chat/completions",
+      "modelsPath": "/models",
+      "keyEnv": ["ZHIPU_API_KEY", "GLM_API_KEY"],
+      "models": {
+        "fast": "glm-5.3-flash",
+        "pro": "glm-5.3",
+        "reasoning": "glm-5.3",
+        "long": "glm-5.3"
+      },
+      "modelEnv": {
+        "fast": "GLM_FAST_MODEL",
+        "pro": "GLM_MODEL",
+        "reasoning": "GLM_MODEL",
+        "long": "GLM_MODEL"
+      },
+      "temperature": 0.3,
+      "maxTokens": 8000,
+      "thinking": {
+        "supported": true,
+        "default": "auto",
+        "effortSupported": true,
+        "defaultEffort": "high",
+        "effortValues": ["low", "high", "max"]
+      },
+      "alwaysThinkingModels": ["^glm-5\\.3"],
+      "visionModels": ["^glm-5\\.3-flash$"],
+      "notes": [
+        "glm-5.3 and glm-5.3-flash always think; --thinking off is ignored. Flash is cheap multimodal (vision-review, third-opinion).",
+        "baseUrl is the Coding Plan OpenAI endpoint (2026-09-24). The pay-as-you-go host is https://open.bigmodel.cn/api/paas/v4.",
+        "2026-08-22: older GLM silently misquoted sources. Do not use GLM for un-checked verbatim extraction."
+      ]
+    }
+  },
+  "roundtableSets": {
+    "default": [
+      { "provider": "deepseek", "modelRole": "pro", "thinking": "on", "effort": "high", "seat": "builder" },
+      { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "high", "maxTokens": 16000, "seat": "adversary" },
+      { "provider": "glm", "modelRole": "reasoning", "thinking": "on", "effort": "high", "seat": "alt" }
+    ],
+    "product": [
+      { "provider": "deepseek", "modelRole": "pro", "thinking": "on", "effort": "high", "seat": "builder" },
+      { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "high", "maxTokens": 16000, "seat": "adversary" },
+      { "provider": "glm", "modelRole": "reasoning", "thinking": "on", "effort": "high", "seat": "alt" }
+    ],
+    "code": [
+      { "provider": "glm", "modelRole": "reasoning", "thinking": "on", "effort": "high", "seat": "correctness" },
+      { "provider": "kimi", "model": "kimi-k2.7-code", "thinking": "off", "seat": "maintainability" },
+      { "provider": "deepseek", "modelRole": "pro", "thinking": "on", "effort": "high", "seat": "contract" }
+    ]
+  },
+  "tasks": {
+    "summarize": {
+      "description": "Long document summary; no thinking by default.",
+      "provider": "deepseek",
+      "modelRole": "fast",
+      "thinking": "off",
+      "maxTokens": 3000,
+      "temperature": 0.2,
+      "promptKey": "summarize",
+      "defaultQuestion": "请用中文总结材料，只保留材料内的关键事实、结论和待验证风险。没有的不要写。"
+    },
+    "extract": {
+      "description": "Information extraction or structured compression; no thinking by default.",
+      "provider": "deepseek",
+      "modelRole": "fast",
+      "thinking": "off",
+      "maxTokens": 3000,
+      "temperature": 0.1,
+      "promptKey": "extract",
+      "defaultQuestion": "请从材料中抽取关键信息，按清晰结构输出。材料没有的标「材料未给出」，不要补全。"
+    },
+    "review": {
+      "description": "Technical or product plan review; thinking on by default.",
+      "provider": "deepseek",
+      "modelRole": "pro",
+      "thinking": "on",
+      "effort": "high",
+      "maxTokens": 8000,
+      "temperature": 0.2,
+      "promptKey": "review",
+      "defaultQuestion": "请评审这个方案。每条发现带严重度、材料原句、建议。"
+    },
+    "think": {
+      "description": "Deep reasoning; pro/reasoning model with high reasoning budget.",
+      "provider": "deepseek",
+      "modelRole": "reasoning",
+      "thinking": "on",
+      "effort": "max",
+      "maxTokens": 10000,
+      "temperature": 0.2,
+      "promptKey": "think",
+      "defaultQuestion": "请深度分析。结论、不确定性、可执行建议。材料日期之后的事实标未核实。"
+    },
+    "think-k3": {
+      "description": "Adversarial reasoning via Kimi K3 (streams at high/max).",
+      "provider": "kimi-k3",
+      "modelRole": "reasoning",
+      "effort": "max",
+      "maxTokens": 20000,
+      "promptKey": "think-k3",
+      "defaultQuestion": "请对抗性评审。允许推翻材料。不知道就写不知道。"
+    },
+    "third-opinion": {
+      "description": "Independent third vote (GLM-5.3).",
+      "provider": "glm",
+      "modelRole": "reasoning",
+      "thinking": "on",
+      "effort": "high",
+      "maxTokens": 8000,
+      "temperature": 0.3,
+      "promptKey": "third-opinion",
+      "defaultQuestion": "请作为独立第三方评审，先给结论再挑错。引用必须是材料原句。"
+    },
+    "map": {
+      "description": "Architecture / call-chain from an explore evidence packet. Does not search the repo.",
+      "provider": "deepseek",
+      "modelRole": "fast",
+      "thinking": "off",
+      "maxTokens": 4000,
+      "temperature": 0.1,
+      "promptKey": "map",
+      "defaultQuestion": "根据证据包列出模块关系、调用链、文件职责。不要发明未出现的路径。"
+    },
+    "explore-review": {
+      "description": "Review an explore evidence packet as excerpts, not a full tree.",
+      "provider": "deepseek",
+      "modelRole": "pro",
+      "thinking": "on",
+      "effort": "high",
+      "maxTokens": 8000,
+      "promptKey": "explore-review",
+      "defaultQuestion": "按证据包评审。每条发现带路径和原句。不要假装读过完整文件。"
+    },
+    "code-review": {
+      "description": "Snippet / patch review. Default GLM-5.3; snippet domain uses K2.7 Code.",
+      "provider": "glm",
+      "modelRole": "reasoning",
+      "thinking": "on",
+      "effort": "high",
+      "maxTokens": 8000,
+      "promptKey": "code-review",
+      "defaultQuestion": "请做代码评审。每条：file、severity、quote、suggestion。"
+    },
+    "verify": {
+      "description": "Single-claim verdict from supplied material only. Web claims must not use this task — use host web / Codex.",
+      "provider": "deepseek",
+      "modelRole": "fast",
+      "thinking": "off",
+      "maxTokens": 800,
+      "temperature": 0,
+      "promptKey": "verify",
+      "defaultQuestion": "判断材料能否支撑该主张。第一行 CONFIRMED 或 REFUTED 或 UNKNOWN。"
+    },
+    "vision-review": {
+      "description": "Screenshot / UI review. Prefer glm-5.3-flash (native vision) or K3.",
+      "provider": "glm",
+      "modelRole": "fast",
+      "thinking": "on",
+      "effort": "high",
+      "maxTokens": 4000,
+      "promptKey": "vision-review",
+      "defaultQuestion": "请评审界面或截图。没有视觉材料则只输出「缺少视觉材料」。"
+    },
+    "red-team": {
+      "description": "Adversarial review; K3 high by default. Product domain allows overturning.",
+      "provider": "kimi-k3",
+      "modelRole": "reasoning",
+      "effort": "high",
+      "maxTokens": 16000,
+      "promptKey": "red-team",
+      "defaultQuestion": "请当红队。默认材料可能错。每条攻击要有材料内证据，否则标「推测」。"
+    },
+    "roundtable": {
+      "description": "Parallel independent seats for the host to synthesize. The host coordinates any cross-examination separately.",
+      "set": "default",
+      "maxTokens": 8000,
+      "temperature": 0.3,
+      "defaultQuestion": "请独立评审这些材料。按输出骨架写。不要附和其他模型。"
+    }
+  },
+  "aliases": {
+    "deepseek": { "provider": "deepseek", "model": "deepseek-v4-flash", "thinking": "off", "temperature": 0.2, "maxTokens": 8000, "desc": "= deepseek-flash. Cheap workhorse." },
+    "deepseek-flash": { "provider": "deepseek", "model": "deepseek-v4-flash", "thinking": "off", "temperature": 0.2, "maxTokens": 8000, "desc": "V4 flash, no thinking. Compression, extraction, bulk." },
+    "deepseek-pro": { "provider": "deepseek", "model": "deepseek-v4-pro", "thinking": "off", "temperature": 0.2, "maxTokens": 8000, "desc": "V4 pro, thinking OFF. For thinking mode use --task review / think." },
+    "kimi": { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "high", "maxTokens": 16000, "desc": "= kimi-k3-high. Perspective, not savings. Minutes." },
+    "kimi-k3": { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "max", "maxTokens": 20000, "desc": "K3 effort=max, streamed. Deepest adversarial pass." },
+    "kimi-k3-high": { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "high", "maxTokens": 16000, "desc": "K3 effort=high, streamed. Default second opinion." },
+    "kimi-k3-low": { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "low", "maxTokens": 8000, "desc": "K3 effort=low, seconds. Rule-clear extraction." },
+    "kimi-code": { "provider": "kimi", "model": "kimi-k2.7-code", "thinking": "on", "maxTokens": 8000, "desc": "K2.7 Code. Always thinks. Snippet second look, not K3 max." },
+    "kimi-code-fast": { "provider": "kimi", "model": "kimi-k2.7-code-highspeed", "thinking": "on", "maxTokens": 4000, "desc": "K2.7 Code highspeed ~180 tok/s. Always thinks." },
+    "glm": { "provider": "glm", "modelRole": "reasoning", "thinking": "on", "effort": "high", "temperature": 0.3, "maxTokens": 8000, "desc": "= glm-5.3. Independent third opinion; always thinks." },
+    "glm-5.3": { "provider": "glm", "model": "glm-5.3", "thinking": "on", "effort": "high", "temperature": 0.3, "maxTokens": 8000, "desc": "GLM-5.3 pinned. Always thinks." },
+    "glm-flash": { "provider": "glm", "model": "glm-5.3-flash", "thinking": "on", "effort": "high", "temperature": 0.3, "maxTokens": 4000, "desc": "GLM-5.3-Flash. Cheap multimodal / third vote. Recheck citations." },
+    "kimi-k26": { "dead": true, "successor": "kimi-code", "desc": "DEAD. K2.6 empty-content bug. Use kimi-code or kimi-k3-low." },
+    "kimi-thinking": { "dead": true, "successor": "kimi-k3-high", "desc": "DEAD. Use kimi / kimi-k3-high." },
+    "kimi-fast": { "dead": true, "successor": "deepseek-flash", "desc": "DEAD. moonshot-v1 sunsets 2026-08-31. Use deepseek-flash." },
+    "moonshot": { "dead": true, "successor": "deepseek-flash", "desc": "DEAD. V1 sunsets 2026-08-31." },
+    "moonshot-32k": { "dead": true, "successor": "deepseek-flash", "desc": "DEAD. V1 sunsets 2026-08-31." },
+    "glm-5": { "dead": true, "successor": "glm", "desc": "DEAD. Use glm / glm-5.3." },
+    "glm-5.1": { "dead": true, "successor": "glm", "desc": "DEAD. Use glm-5.3." },
+    "glm-5.2": { "provider": "glm", "model": "glm-5.2", "thinking": "auto", "temperature": 0.3, "maxTokens": 8000, "desc": "LEGACY pin. Prefer glm-5.3 unless reproducing an old run." }
+  }
+}
