@@ -1,4 +1,4 @@
 interface:
   display_name: "multi-ai"
-  short_description: "Run multi-model reviews and verify reports with multi-ai"
-  default_prompt: "Use $multi-ai to review the supplied material and verify the findings."
+  short_description: "Delegate scoped investigation and compare model perspectives"
+  default_prompt: "Use $multi-ai for the authorized material and routes, then verify the findings."

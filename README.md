@@ -1,5 +1,7 @@
 # multi-ai
 
+源码 v0.2 新增低成本委派：`pack` 离线材料快照，`delegate investigate|extract|challenge TARGET` 执行 Kimi/Grok 受限调查或 API 材料加工，返回短交接与可核验完整报告。使用前查看 `doctor` 的委派能力；完整流程、边界和指标见 [DELEGATION.md](docs/DELEGATION.md)。下方 GitHub 下载示例仍指已发布 v0.1.0；本轮 v0.2 可从源码构建或使用本地生成的发布包。
+
 Rust 原生多 AI 工具，统一 `ai-review` 与 `llm-run`。首版验收 macOS Apple Silicon；API 请求、调度、报告、输出锁和反馈均在同一程序中执行。安装后的工具本体无需 Python、Node、uv 或 Rust 编译器。
 
 厂商 CLI 是可选依赖：使用 Codex、Grok、Antigravity、Kimi Code 或 Claude Code 通路时，仍需安装对应 CLI 并登录。纯 API 通路不依赖这些 CLI。

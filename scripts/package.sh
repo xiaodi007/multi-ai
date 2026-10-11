@@ -29,14 +29,19 @@ cp -Rp "$repo_dir/integration/skills/multi-ai" "$stage/$package_name/integration
 cp -p "$repo_dir/README.md" "$stage/$package_name/"
 cp -p "$repo_dir/docs/COMPATIBILITY.md" "$stage/$package_name/docs/"
 cp -p "$repo_dir/docs/AGENT-INTEGRATION.md" "$stage/$package_name/docs/"
+cp -p "$repo_dir/docs/DELEGATION.md" "$stage/$package_name/docs/"
+cp -p "$repo_dir/docs/CLI-ISOLATION.md" "$stage/$package_name/docs/"
+cp -p "$repo_dir/docs/VALIDATION-v0.2.md" "$stage/$package_name/docs/"
+cp -p "$repo_dir/docs/TOKEN-BENCHMARK-v0.2.md" "$stage/$package_name/docs/"
 chmod 755 "$stage/$package_name/bin/multi-ai" "$stage/$package_name/install.sh" "$stage/$package_name/rollback.sh" "$stage/$package_name/update-skills.sh" "$stage/$package_name/rollback-skills.sh"
 chmod 755 "$stage/$package_name/install-skills.sh" "$stage/$package_name/rollback-agent-skills.sh" "$stage/$package_name/integration/skills/multi-ai/scripts/run.sh"
 (
   cd "$stage/$package_name"
-  shasum -a 256 bin/multi-ai install.sh rollback.sh update-skills.sh rollback-skills.sh install-skills.sh rollback-agent-skills.sh README.md docs/COMPATIBILITY.md docs/AGENT-INTEGRATION.md \
+  shasum -a 256 bin/multi-ai install.sh rollback.sh update-skills.sh rollback-skills.sh install-skills.sh rollback-agent-skills.sh README.md docs/COMPATIBILITY.md docs/AGENT-INTEGRATION.md docs/DELEGATION.md docs/CLI-ISOLATION.md docs/VALIDATION-v0.2.md docs/TOKEN-BENCHMARK-v0.2.md \
     integration/skills/claude-ai-review.md integration/skills/claude-pipeline.md integration/skills/claude-run.sh \
     integration/skills/codex-pipeline.md integration/skills/codex-run.sh integration/skills/multi-ai/SKILL.md \
-    integration/skills/multi-ai/scripts/run.sh integration/skills/multi-ai/agents/openai.yaml > SHA256SUMS
+    integration/skills/multi-ai/scripts/run.sh integration/skills/multi-ai/agents/openai.yaml \
+    integration/skills/multi-ai/references/delegation.md > SHA256SUMS
   shasum -a 256 -c SHA256SUMS
 )
 archive="$repo_dir/dist/$package_name.tar.gz"

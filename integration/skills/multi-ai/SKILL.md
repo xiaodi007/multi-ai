@@ -1,13 +1,15 @@
 ---
 name: multi-ai
-description: Use the installed multi-ai CLI for requested multi-model reviews, report verification, or DeepSeek/Kimi/GLM text and image processing. Use when the user asks for multiple AI opinions or names multi-ai; ordinary local edits stay on the host.
+description: Delegate authorized repository investigation, material extraction, or cross-model review through multi-ai. Use for requested external AI help or multiple perspectives; small local edits stay on the host.
 ---
 
 # multi-ai
 
 Use the Rust program through this skill's `scripts/run.sh`, which forwards arguments unchanged. Resolve that script relative to the location of this `SKILL.md`; it also works when the agent's PATH omits `~/.local/bin`. The API client needs no Python, Node, uv, or Cargo. CLI routes require their own installed, authenticated vendor tool.
 
-Before choosing a route, run `scripts/run.sh routes --json` and `scripts/run.sh doctor`. These are offline: configured credentials and an executable do not establish login, quota, or service health. Use the user's route preference when given. Read local `--help` for unfamiliar parameters; `doctor --live`, `probe`, and `text list-models` make network requests. `review --dry-run` can collect live quota too.
+Before choosing a route, run `scripts/run.sh routes --json` and `scripts/run.sh doctor`. These are offline: configured credentials and an executable do not establish login, quota, or service health. Use the user's route preference. `doctor --live`, `probe`, and `text list-models` make network requests; `review --dry-run` can collect live quota too.
+
+For authorized delegation, read [references/delegation.md](references/delegation.md). Let the worker read large materials before you do: define a small goal and explicit files/directories, then read its short handoff and verify the evidence that affects your decision. Use at most two parallel independent tasks. Keep simple searches, edits and tests on the host; do not start a roundtable for every step. This workflow uses synchronous CLI calls, not a native host sub-agent panel.
 
 Choose the smallest useful operation:
 
@@ -21,7 +23,7 @@ Choose the smallest useful operation:
 
 Use explicit route names such as `glm-api`, `kimi-k3-cli`, and `codex-cli`; `routes` supplies the full configured list. `--only ROUTE…` selects review candidates. The review scheduler deduplicates quota pools and can add backup routes after failure; inspect the resulting manifest to see what actually ran. Respect exclusions, cost preferences, and the requested scope. A single text request does not need a roundtable. API routes only see the supplied text/images; they cannot inspect the path passed in `--cwd`. CLI routes can use vendor tools in their working directory, so choose an appropriately scoped directory.
 
-When this skill runs inside Codex, preserve the existing routing preference: do not automatically select Grok/xAI unless the user explicitly requested it; add `--exclude grok-cli` for a scheduler call when it was not requested. Do not automatically fill an extra seat by nesting Codex CLI from a Codex host; exclude `codex-cli` in that case. An explicit request to exercise those routes authorizes the selected routes. Preserve any more specific host or project routing preferences already in the session.
+For existing `run/review/verify` workflows inside Codex, preserve the routing preference: do not automatically select Grok/xAI unless requested; add `--exclude grok-cli` to scheduler calls when it was not requested. Do not fill an extra seat by nesting Codex CLI from a Codex host; exclude `codex-cli`. The new delegation workflow permits Kimi and Grok when both were authorized for this task, with Kimi → Grok investigation fallback. It does not broaden older review permissions or override a narrower project/session preference.
 
 Send only material authorized for this request. Explicitly requested external processing authorizes those specified materials; a general request to inspect a file does not authorize sending unrelated customer originals or credentials. Prepare a small relevant packet rather than uploading a repository by default. Never print or copy keys into prompts, reports, or installation material.
 

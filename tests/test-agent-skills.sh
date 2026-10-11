@@ -19,6 +19,7 @@ first_backup=$(backup_from "$test_root/fresh.log")
 for platform in .agents .claude; do
   [ -f "$test_home/$platform/skills/multi-ai/SKILL.md" ] || fail "Missing $platform skill"
   [ -x "$test_home/$platform/skills/multi-ai/scripts/run.sh" ] || fail "Runner not executable"
+  [ -f "$test_home/$platform/skills/multi-ai/references/delegation.md" ] || fail "Missing $platform delegation reference"
 done
 cat > "$test_root/fake-binary" <<'EOF'
 #!/bin/sh
@@ -70,4 +71,58 @@ mv "$test_home/.claude" "$test_root/saved-claude"
 ln -s "$test_root/saved-claude" "$test_home/.claude"
 sh "$repo_dir/scripts/rollback-agent-skills.sh" "$parent_backup" > "$test_root/parent-rollback.log" 2>&1
 [ -f "$test_root/saved-claude/skills/multi-ai/SKILL.md" ] || fail 'Rollback traversed changed parent'
-printf '%s\n' 'PASS: fresh install, exact runner forwarding, preserve-existing, safe rollback, custom directory and symlink protection'
+
+# Recognized v0.1 files upgrade independently of unknown files, and restore to
+# their exact original bytes/modes. The fixture is fixed, not derived from HEAD.
+upgrade_home="$test_root/upgrade home"
+mkdir "$upgrade_home"
+old_fixture="$repo_dir/tests/fixtures/skill-v0.1"
+for platform in .agents .claude; do
+  target="$upgrade_home/$platform/skills/multi-ai"
+  mkdir -p "$target/scripts" "$target/agents"
+  cp "$old_fixture/SKILL.md" "$target/SKILL.md"
+  cp "$old_fixture/scripts/run.sh" "$target/scripts/run.sh"
+  cp "$old_fixture/agents/openai.yaml" "$target/agents/openai.yaml"
+  chmod 644 "$target/SKILL.md" "$target/agents/openai.yaml"
+  chmod 755 "$target/scripts/run.sh"
+  printf '%s\n' user-owned > "$target/custom.txt"
+done
+sh "$repo_dir/scripts/install-skills.sh" --home "$upgrade_home" > "$test_root/old-preserved.log"
+cmp "$old_fixture/SKILL.md" "$upgrade_home/.agents/skills/multi-ai/SKILL.md" || fail 'Default install upgraded old skill'
+[ ! -e "$upgrade_home/.agents/skills/multi-ai/references" ] || fail 'Default install added reference to old skill'
+sh "$repo_dir/scripts/install-skills.sh" --home "$upgrade_home" --upgrade > "$test_root/upgraded.log"
+upgrade_backup=$(backup_from "$test_root/upgraded.log")
+for platform in .agents .claude; do
+  target="$upgrade_home/$platform/skills/multi-ai"
+  cmp "$repo_dir/integration/skills/multi-ai/SKILL.md" "$target/SKILL.md" || fail 'Known old skill not upgraded'
+  [ -f "$target/references/delegation.md" ] || fail 'Upgrade omitted reference'
+  [ "$(cat "$target/custom.txt")" = user-owned ] || fail 'Upgrade changed unknown file'
+done
+printf '%s\n' 'later user decision' >> "$upgrade_home/.claude/skills/multi-ai/SKILL.md"
+cp "$upgrade_home/.claude/skills/multi-ai/SKILL.md" "$test_root/later.md"
+sh "$repo_dir/scripts/rollback-agent-skills.sh" "$upgrade_backup" > "$test_root/upgrade-rollback.log" 2>&1
+cmp "$old_fixture/SKILL.md" "$upgrade_home/.agents/skills/multi-ai/SKILL.md" || fail 'Upgrade rollback did not restore old content'
+cmp "$test_root/later.md" "$upgrade_home/.claude/skills/multi-ai/SKILL.md" || fail 'Upgrade rollback overwrote later change'
+[ ! -e "$upgrade_home/.agents/skills/multi-ai/references" ] || fail 'Upgrade rollback left added empty reference tree'
+[ -f "$upgrade_home/.agents/skills/multi-ai/custom.txt" ] || fail 'Upgrade rollback removed unknown file'
+[ "$(stat -f '%Lp' "$upgrade_home/.agents/skills/multi-ai/scripts/run.sh")" = 755 ] || fail 'Upgrade rollback lost runner mode'
+
+# An already customized old entry remains untouched, while managed companions
+# can update; merge guidance identifies the preserved entry.
+printf '%s\n' 'old local customization' >> "$upgrade_home/.agents/skills/multi-ai/SKILL.md"
+cp "$upgrade_home/.agents/skills/multi-ai/SKILL.md" "$test_root/local-old.md"
+sh "$repo_dir/scripts/install-skills.sh" --home "$upgrade_home" --only codex --upgrade > "$test_root/custom-upgrade.log" 2>&1
+custom_backup=$(backup_from "$test_root/custom-upgrade.log")
+cmp "$test_root/local-old.md" "$upgrade_home/.agents/skills/multi-ai/SKILL.md" || fail 'Customized old entry overwritten'
+[ -f "$custom_backup/MERGE.md" ] || fail 'Missing merge guidance'
+sh "$repo_dir/scripts/rollback-agent-skills.sh" "$custom_backup" > "$test_root/custom-rollback.log" 2>&1
+cmp "$test_root/local-old.md" "$upgrade_home/.agents/skills/multi-ai/SKILL.md" || fail 'Customized entry changed during rollback'
+
+# Corrupted prior bytes cannot be restored over an otherwise managed file.
+cp "$old_fixture/SKILL.md" "$upgrade_home/.agents/skills/multi-ai/SKILL.md"
+sh "$repo_dir/scripts/install-skills.sh" --home "$upgrade_home" --only codex --upgrade > "$test_root/corrupt-upgrade.log"
+corrupt_backup=$(backup_from "$test_root/corrupt-upgrade.log")
+printf '%s\n' corruption >> "$corrupt_backup/entries/1/before/SKILL.md"
+if sh "$repo_dir/scripts/rollback-agent-skills.sh" "$corrupt_backup" > "$test_root/corrupt-rollback.log" 2>&1; then fail 'Corrupted backup restored'; fi
+cmp "$repo_dir/integration/skills/multi-ai/SKILL.md" "$upgrade_home/.agents/skills/multi-ai/SKILL.md" || fail 'Damaged prior entry was published'
+printf '%s\n' 'PASS: fresh install, forwarding, preservation, safe rollback, v0.1 managed upgrade, merge guide, checksum guards and symlink protection'

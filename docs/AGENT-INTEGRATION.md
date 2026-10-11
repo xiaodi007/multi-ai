@@ -23,6 +23,8 @@ shasum -a 256 -c SHA256SUMS
 
 安装脚本不修改全局 `AGENTS.md`、`CLAUDE.md`、shell 配置或 agent 权限，不注册 MCP，不复制 API key。API 凭据按现有读取顺序自行配置；CLI 路线还需要相应客户端安装与登录。skill 的 runner 直接执行 Rust 二进制，不依赖 Node，也能在 agent 的 PATH 没有 `~/.local/bin` 时使用默认安装位置。
 
+v0.2 的受限调查在每次委派内部启动同一 Rust 程序的 stdio MCP 读取服务，只向受控 Kimi／Grok 配置开放快照的 `list/search/read`。这是一次调用内的传输，不需要在 Codex／Claude 注册常驻 MCP，也不会让工具出现在宿主原生子 agent 面板。授权材料和通路后，skill 可以先委派大批阅读，再由主 AI 阅读短交接、核验关键证据并完成测试。默认最多并行两个独立任务；完整边界和命令见 [DELEGATION.md](DELEGATION.md)。
+
 先开新会话，输入 `$multi-ai` 或 `/multi-ai`，要求“仅运行 routes 和 doctor，列出可用通路，先不要联网”。然后明确指定材料与通路，执行一次短真实请求。`doctor` 的配置就绪不代表已经联网成功。
 
 本地安装不会部署到 Codex 云端环境、Claude Cowork 或 Claude 云会话。那些环境需要各自可执行的二进制、配置与凭据；本发布包只验收 macOS Apple Silicon。
@@ -38,6 +40,14 @@ shasum -a 256 -c SHA256SUMS
 优先按所用 Codex 的实际发现目录安装。macOS 验证中的 CLI 和桌面运行时 0.160.0 的 `skills/list` 行为是：默认目录与旧目录各放一份同名 skill，会列出两个启用条目，不会跨目录去重。不要把双目录复制作为通用安装步骤；仅保留默认目录时，两种运行时均已发现唯一启用入口。不同版本的发现及去重行为应以自己的技能列表核验。
 
 已有 `multi-llm-pipeline`、`ai-review` 技能保留。`install-skills.sh` 用于新建独立 `multi-ai` 技能；`update-skills.sh` 用于迁移已有旧技能。前者默认保留整个已存在的 `multi-ai` 目录，不覆盖用户修改，即使该目录尚无 `SKILL.md` 也会提示保留。
+
+已有独立 multi-ai skill 可显式升级受管理文件：
+
+```sh
+./install-skills.sh --upgrade
+```
+
+升级只替换内容哈希和权限均匹配已发布 v0.1 或当前模板的文件，先备份再逐个发布，入口 `SKILL.md` 最后更新。被用户修改的文件和未知文件保留；输出 `MERGE_GUIDE=…` 指向需手工合并的位置。新增 `references/delegation.md` 随安装／升级进入 skill 目录。不会通过本地“已管理”标记把未知内容当成受管理文件。
 
 ## 诊断与回退
 
@@ -56,6 +66,8 @@ skill 安装输出独立的 `BACKUP_DIR=…`，回退命令是：
 ```
 
 它只删除该次新建且仍未改动的技能；任何修改、额外文件、替换符号链接或父目录变化都会保留整个技能目录。原本已有的技能从未被覆盖。保留备份记录，并先回退技能，再回退程序安装。旧技能迁移仍使用单独的 `rollback-skills.sh`。
+
+对于 `--upgrade` 的备份，回退按文件检查安装后哈希和权限：未改动的文件恢复原内容及权限，新加且未改动的文件删除；之后修改的文件保留。原文件备份也校验哈希，拒绝损坏的备份。未知文件和已变化的父目录不处理。
 
 安装脚本支持 `--home DIR`、`--codex-dir DIR`、`--claude-dir DIR`、`--only codex|claude|both` 和 `--templates DIR`。自定义目标必须位于所选 home 内；`--templates` 指向包含 `SKILL.md`、`scripts/run.sh` 和 `agents/openai.yaml` 的模板目录。可隔离验证：
 

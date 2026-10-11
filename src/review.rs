@@ -174,7 +174,7 @@ fn state_update<F: FnOnce(&mut Value)>(update: F) -> Result<()> {
     runtime::atomic_json(&state_file(), &state)?;
     Ok(())
 }
-fn blocked(pool: &str) -> Option<Value> {
+pub(crate) fn blocked(pool: &str) -> Option<Value> {
     let entry = load_state()["pools"][pool].clone();
     if entry["until"].as_f64().unwrap_or(0.0) > now() {
         Some(entry)
@@ -215,7 +215,7 @@ pub fn classify(text: &str, rc: i32, timed_out: bool, prompt: &str) -> String {
         ),
         (
             "auth",
-            r"(?i)401|403|unauthorized|forbidden|not logged ?in|please log ?in|invalid (bearer|api.?key|token)|token expired|authentication",
+            r"(?i)401|403|unauthorized|forbidden|not logged ?in|please log ?in|invalid (bearer|api.?key|token)|token expired|authentication|authorization grant.{0,40}(invalid|expired)|no credential configured",
         ),
         (
             "transport",
@@ -327,7 +327,7 @@ fn snapshot_wait(pool: &str) -> Option<f64> {
         .filter(|t| *t >= 1.0)
         .reduce(f64::min)
 }
-fn cool_down(pool: &str, kind: &str, detail: &str) -> Result<()> {
+pub(crate) fn cool_down(pool: &str, kind: &str, detail: &str) -> Result<()> {
     let default = match kind {
         "quota" => 60.0,
         "auth" => 240.0,

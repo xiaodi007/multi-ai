@@ -1,0 +1,4 @@
+interface:
+  display_name: "multi-ai"
+  short_description: "Run multi-model reviews and verify reports with multi-ai"
+  default_prompt: "Use $multi-ai to review the supplied material and verify the findings."

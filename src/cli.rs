@@ -96,6 +96,16 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
             "evidence",
         ],
         "install-config" => &["from"],
+        "pack" => &["root", "input", "scope", "outdir"],
+        "delegate" => &[
+            "packet",
+            "prompt-file",
+            "outdir",
+            "fallback",
+            "timeout",
+            "resume",
+        ],
+        "_broker" => &["packet", "audit"],
         _ => return Ok(()),
     };
     for key in args.values.keys().chain(args.flags.iter()) {
@@ -119,6 +129,14 @@ fn help_app() -> Command {
         .after_help("API 本体不依赖 Python/Node；CLI 通路按需安装登录。\n旧 ai-review / llm-run 入口保留语义。help/routes/doctor 默认离线。");
     for (name, about) in [
         ("run", "指定通路；--timeout 单位秒"),
+        (
+            "pack",
+            "离线材料快照；--root DIR --input FILE/--scope DIR --outdir 新目录",
+        ),
+        (
+            "delegate",
+            "受限委派；ROLE TARGET --packet DIR --prompt-file FILE --outdir DIR",
+        ),
         (
             "review",
             "并行复核；--kind review|explore|verify；按额度池备援",
@@ -163,7 +181,11 @@ fn print_help(topic: Option<&str>, legacy: Option<&str>) -> Result<()> {
         app.print_long_help()?;
     }
     println!();
-    if legacy == Some("llm-run") || topic == Some("text") {
+    if topic == Some("pack") || topic == Some("delegate") {
+        println!(
+            "材料快照：\n  multi-ai pack --root DIR --input FILE --scope DIR --outdir NEW-DIR\n委派：\n  multi-ai delegate investigate kimi-cli-default --packet DIR --prompt-file TASK --outdir DIR --fallback grok-cli\n  multi-ai delegate extract deepseek-flash --packet DIR --prompt-file TASK --outdir DIR --resume --json\n角色：investigate|extract|challenge；--timeout 默认300秒（含备援）。\n--input/--scope/--fallback 可重复；默认stdout短交接，完整报告路径随结果返回。\n调查只开放快照的list/search/read；doctor展示隔离与版本可用性。\npack输出必须是新目录，快照immutable；--resume只复用身份完整匹配结果。"
+        );
+    } else if legacy == Some("llm-run") || topic == Some("text") {
         println!(
             "文本接口：\n  multi-ai text <alias> [prompt] --input FILE --out FILE [--json]\n  multi-ai text run --task NAME [--domain NAME] --input FILE\n  multi-ai text dispatch --domain NAME [--kind review|map|debate] --input FILE\n  multi-ai text profiles|domains|aliases [--json]\n  multi-ai text list-models [--json]  # 联网，需凭据\n\n--input 可重复，--input - 接收stdin；--image支持png/jpg/webp。\n--thinking auto|on|off，--effort low|high|max，--max-tokens N。\n--timeout-ms / --headers-timeout-ms / --idle-timeout-ms 单位毫秒。\n--stream / --no-stream；--quiet；--legacy。\n--resume 需 --out，同身份完整结果才复用；非Git恢复需 --source-id。\nstdout完整正文或JSON；stderr进度；partial不证明成功。"
         );
@@ -200,6 +222,7 @@ fn doctor(config: &Config, args: &Args) -> Result<i32> {
         }
         let mut row =
             json!({"route":route.id,"pool":route.pool,"family":route.family,"live_checked":false});
+        row["delegation"] = crate::delegate::capability(config, route);
         if let Some(alias) = &route.api_alias {
             let meta = config.alias_metadata(alias, &Args::default())?;
             let provider = meta["provider"].as_str().context("provider missing")?;
@@ -342,10 +365,25 @@ pub async fn main_entry(argv: Vec<String>) -> Result<i32> {
     if command == "feedback" {
         return runtime::feedback_command(&args);
     }
+    if command == "pack" {
+        return crate::delegate::pack_command(&args);
+    }
+    if command == "_broker" {
+        crate::broker::serve(
+            Path::new(args.get("packet").context("missing --packet")?),
+            Path::new(args.get("audit").context("missing --audit")?),
+        )
+        .await?;
+        return Ok(0);
+    }
     let config = Config::load()?;
     match command.as_str() {
         "routes" => {
-            let value = config.public_routes()?;
+            let mut value = config.public_routes()?;
+            for entry in value.as_array_mut().context("routes not array")? {
+                let route = config.route(entry["id"].as_str().unwrap(), false)?;
+                entry["capabilities"]["delegation"] = crate::delegate::capability(&config, &route);
+            }
             if args.has("json") {
                 println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
@@ -373,6 +411,7 @@ pub async fn main_entry(argv: Vec<String>) -> Result<i32> {
                 doctor(&config, &args)
             }
         }
+        "delegate" => crate::delegate::command(&config, &args).await,
         "run" | "review" | "dispatch" | "verify" | "probe" | "usage" | "status" | "reset" => {
             crate::review::command(
                 &config,
