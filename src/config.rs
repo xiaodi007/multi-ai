@@ -25,6 +25,21 @@ pub struct Route {
     pub api_alias: Option<String>,
 }
 
+impl Route {
+    /// The same explicit model selector is used for display, identity and execution.
+    pub fn explicit_model(&self) -> Option<String> {
+        self.argv.iter().enumerate().rev().find_map(|(index, arg)| {
+            let model = if arg == "-m" || arg == "--model" {
+                self.argv.get(index + 1).map(String::as_str)
+            } else {
+                arg.strip_prefix("--model=")
+            }?;
+            (!model.is_empty() && !model.starts_with('-') && !model.contains('{'))
+                .then(|| model.to_owned())
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub profiles: Value,
@@ -114,6 +129,26 @@ impl Config {
 
     pub fn environment(&self) -> &HashMap<String, String> {
         &self.environment
+    }
+
+    /// Build a child-only PATH override, without changing the process environment.
+    pub(crate) fn with_path_prepend(&self, prefixes: &[PathBuf]) -> Result<Self> {
+        let mut copy = self.clone();
+        if !prefixes.is_empty() {
+            let paths = prefixes.iter().cloned().chain(
+                self.environment
+                    .get("PATH")
+                    .into_iter()
+                    .flat_map(std::env::split_paths),
+            );
+            let path = std::env::join_paths(paths).context("invalid --path-prepend directory")?;
+            copy.environment.insert(
+                "PATH".into(),
+                path.into_string()
+                    .map_err(|_| anyhow::anyhow!("PATH must be UTF-8"))?,
+            );
+        }
+        Ok(copy)
     }
 
     fn validate(&self) -> Result<()> {
@@ -257,11 +292,7 @@ impl Config {
                 entry["capabilities"]["vision"] =
                     json!(matches_patterns(&provider["visionModels"], &req.model)?);
             } else {
-                let fixed_model = route
-                    .argv
-                    .windows(2)
-                    .find(|args| args[0] == "-m" || args[0] == "--model")
-                    .map(|args| args[1].clone());
+                let fixed_model = route.explicit_model();
                 entry["model"] = json!(fixed_model);
                 entry["model_source"] = json!(if fixed_model.is_some() {
                     "route"

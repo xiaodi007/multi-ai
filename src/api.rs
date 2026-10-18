@@ -391,6 +391,18 @@ async fn configured_request(
     )
     .await
 }
+pub fn http_error_code(status: u16, message: &str) -> &'static str {
+    match status {
+        402 => "quota",
+        401 | 403 | 429 => match crate::review::classify(message, 1, false, "").as_str() {
+            "quota" => "quota",
+            _ if status == 429 => "rate_limit",
+            _ => "auth",
+        },
+        500..=599 => "transport",
+        _ => "http_error",
+    }
+}
 async fn request_impl(
     spec: &ResolvedRequest,
     attempt: &Attempt,
@@ -442,9 +454,9 @@ async fn request_impl(
                 if !status.is_success() {
                     let mut text=Vec::new();
                     read_response(response,deadline,spec.idle_timeout_ms,attempt,&mut metrics,start,&mut redactor,&mut notice,|b,_|{ if text.len()<8192 {text.extend_from_slice(&b[..b.len().min(8192-text.len())]);}Ok(()) }).await?;
-                    let code=match status.as_u16() {401|403=>"auth",429|402=>"quota",500..=599=>"transport",_=>"http_error"};
+                    let code=http_error_code(status.as_u16(), &String::from_utf8_lossy(&text));
                     let message=redact(&String::from_utf8_lossy(&text),&spec.key).chars().take(1200).collect::<String>();
-                    return Err(error(code,format!("HTTP {status}: {message}"),status.as_u16()==429||status.is_server_error()));
+                    return Err(error(code,format!("HTTP {status}: {message}"),code=="rate_limit"||status.is_server_error()));
                 }
                 let mut complete=Completion {model:spec.model.clone(),..Default::default()};
                 if spec.stream {
@@ -467,7 +479,7 @@ async fn request_impl(
                     validate_completion(&complete.content,complete.reasoning_chars,complete.finish_reason.as_deref(),complete.finish_reason.is_some())?;
                 }
                 let content=redact(&complete.content,&spec.key);
-                let result=json!({"provider":spec.provider,"providerName":spec.provider,"model":redact(&complete.model,&spec.key),"modelSource":spec.model_source,"content":content,"usage":complete.usage,"thinking":spec.thinking,"effort":spec.effort,"seat":null,"reasoningChars":complete.reasoning_chars,"finishReason":complete.finish_reason,"complete":true,"progressDir":attempt.dir,"timings":timings(&metrics,start),"runId":attempt.run_id,"attemptId":attempt.id,"run_id":attempt.run_id,"attempt_id":attempt.id});
+                let result=json!({"inputBytes":input.len(),"outputBytes":content.len(),"provider":spec.provider,"providerName":spec.provider,"model":redact(&complete.model,&spec.key),"modelSource":spec.model_source,"content":content,"usage":complete.usage,"thinking":spec.thinking,"effort":spec.effort,"seat":null,"reasoningChars":complete.reasoning_chars,"finishReason":complete.finish_reason,"complete":true,"progressDir":attempt.dir,"timings":timings(&metrics,start),"runId":attempt.run_id,"attemptId":attempt.id,"run_id":attempt.run_id,"attempt_id":attempt.id});
                 Ok(result)
             }.await;
                 match result {

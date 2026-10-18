@@ -23,6 +23,16 @@ fn parse_args(tokens: &[String]) -> Result<Args> {
 fn validate_review_args(command: &str, args: &Args) -> Result<()> {
     let common = &["help", "json", "quiet"];
     let specific: &[&str] = match command {
+        "batch" => &[
+            "jobs",
+            "outdir",
+            "pool-limit",
+            "rate-limit-retries",
+            "retry-delay-ms",
+            "timeout",
+            "resume",
+            "source-id",
+        ],
         "run" => &[
             "prompt-file",
             "prompt",
@@ -37,8 +47,13 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
             "resume",
             "source-id",
             "ignore-cooldown",
+            "fallback",
+            "rate-limit-retries",
+            "retry-delay-ms",
         ],
         "review" | "dispatch" => &[
+            "rate-limit-retries",
+            "retry-delay-ms",
             "prompt-file",
             "prompt",
             "kind",
@@ -61,6 +76,8 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
             "no-quota",
         ],
         "verify" => &[
+            "rate-limit-retries",
+            "retry-delay-ms",
             "findings",
             "by",
             "exclude",
@@ -78,6 +95,7 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
             "no-quota",
         ],
         "probe" => &["only", "timeout"],
+        "stats" => &["state-dir"],
         "usage" | "status" => &[],
         "reset" => &["all"],
         "routes" => &[],
@@ -97,6 +115,14 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
         ],
         "install-config" => &["from"],
         "pack" => &["root", "input", "scope", "outdir"],
+        "delegate" if args.positional.first().is_some_and(|v| v == "implement") => &[
+            "cwd",
+            "out",
+            "prompt-file",
+            "timeout",
+            "path-prepend",
+            "allow-dirty",
+        ],
         "delegate" => &[
             "packet",
             "prompt-file",
@@ -126,9 +152,13 @@ fn help_app() -> Command {
     let mut app=Command::new("multi-ai").version(env!("CARGO_PKG_VERSION"))
         .disable_help_subcommand(true)
         .about("Rust 原生多 AI 工具：明确通路、并行复核、可追溯报告")
-        .after_help("API 本体不依赖 Python/Node；CLI 通路按需安装登录。\n旧 ai-review / llm-run 入口保留语义。help/routes/doctor 默认离线。");
+        .after_help("API 本体不依赖 Python/Node；CLI 通路按需安装登录。\n旧 ai-review / llm-run 二进制别名已弃用，暂保留分派语义。help/routes/doctor 默认离线。");
     for (name, about) in [
         ("run", "指定通路；--timeout 单位秒"),
+        (
+            "batch",
+            "批量任务；--jobs FILE --outdir DIR --pool-limit POOL=N；--resume",
+        ),
         (
             "pack",
             "离线材料快照；--root DIR --input FILE/--scope DIR --outdir 新目录",
@@ -153,6 +183,7 @@ fn help_app() -> Command {
         ("probe", "显式探测通路并调用模型"),
         ("usage", "查看已有账户额度"),
         ("status", "查看冷却，不代表已经验证健康"),
+        ("stats", "离线汇总本地运行记录；--json / --state-dir DIR"),
         ("reset", "清指定额度池冷却"),
         ("install-config", "导入配置，不覆盖已有文件、不复制凭据"),
         ("help", "离线帮助"),
@@ -181,9 +212,16 @@ fn print_help(topic: Option<&str>, legacy: Option<&str>) -> Result<()> {
         app.print_long_help()?;
     }
     println!();
-    if topic == Some("pack") || topic == Some("delegate") {
+    if topic == Some("batch") {
+        println!(
+            "multi-ai batch --jobs jobs.json --outdir results [--pool-limit POOL=N] [--timeout SECONDS] [--resume]\n清单为 {{\"jobs\":[{{\"id\":\"one\",\"prompt_file\":\"task.md\",\"cwd\":\"repo\",\"route\":\"grok-cli\",\"fallback\":[]}}],\"pool_limits\":{{\"xai\":2}}}}；路径相对清单，默认每池并发2。\n每项独立 .md / .md.status.json；仅复用身份与正文哈希一致的完整报告。"
+        );
+    } else if topic == Some("pack") || topic == Some("delegate") {
         println!(
             "材料快照：\n  multi-ai pack --root DIR --input FILE --scope DIR --outdir NEW-DIR\n委派：\n  multi-ai delegate investigate kimi-cli-default --packet DIR --prompt-file TASK --outdir DIR --fallback grok-cli\n  multi-ai delegate extract deepseek-flash --packet DIR --prompt-file TASK --outdir DIR --resume --json\n角色：investigate|extract|challenge；--timeout 默认300秒（含备援）。\n--input/--scope/--fallback 可重复；默认stdout短交接，完整报告路径随结果返回。\n调查只开放快照的list/search/read；doctor展示隔离与版本可用性。\npack输出必须是新目录，快照immutable；--resume只复用身份完整匹配结果。"
+        );
+        println!(
+            "实施：\n  multi-ai delegate implement codex-cli --cwd WORKTREE --prompt-file BRIEF --out SUMMARY [--timeout SECONDS] [--path-prepend DIR] [--allow-dirty]\n仅macOS；cwd须为Git工作树顶层，默认拒绝未提交修改；SUMMARY置于cwd之外。\n固定受控workspace-write，运行前后记录HEAD/status/文件变化；不提交，不支持resume。 "
         );
     } else if legacy == Some("llm-run") || topic == Some("text") {
         println!(
@@ -359,6 +397,9 @@ pub async fn main_entry(argv: Vec<String>) -> Result<i32> {
         return Ok(0);
     }
     validate_review_args(command, &args)?;
+    if command == "stats" {
+        return crate::stats::command(&args);
+    }
     if command == "install-config" {
         return install_config(&args);
     }
@@ -411,7 +452,11 @@ pub async fn main_entry(argv: Vec<String>) -> Result<i32> {
                 doctor(&config, &args)
             }
         }
+        "delegate" if args.positional.first().is_some_and(|v| v == "implement") => {
+            crate::implement::command(&config, &args).await
+        }
         "delegate" => crate::delegate::command(&config, &args).await,
+        "batch" => crate::batch::command(&config, &args).await,
         "run" | "review" | "dispatch" | "verify" | "probe" | "usage" | "status" | "reset" => {
             crate::review::command(
                 &config,

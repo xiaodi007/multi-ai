@@ -315,17 +315,7 @@ fn quote(value: &str) -> String {
     serde_json::to_string(value).expect("string serialization")
 }
 fn explicit_model(route: &Route) -> Option<String> {
-    route
-        .argv
-        .windows(2)
-        .find(|args| args[0] == "-m" || args[0] == "--model")
-        .map(|args| args[1].clone())
-        .or_else(|| {
-            route
-                .argv
-                .iter()
-                .find_map(|arg| arg.strip_prefix("--model=").map(str::to_owned))
-        })
+    route.explicit_model()
 }
 fn model_for_kimi(config: &Config, route: &Route) -> Result<String> {
     let model_home = if has_credential(&managed_auth_home(config, Vendor::Kimi), Vendor::Kimi) {

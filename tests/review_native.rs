@@ -99,6 +99,15 @@ fn classification_keeps_context_and_echo_out_of_cooldown() {
         classify("Error [truncated]: exhausted output budget", 1, false, ""),
         "truncated"
     );
+    assert_eq!(
+        classify(
+            "Error [cancelled]: Request cancelled by SIGTERM",
+            1,
+            false,
+            ""
+        ),
+        "cancelled"
+    );
     assert_eq!(classify("Please log in; 401", 1, false, ""), "auth");
     assert_eq!(classify("quota exhausted", 1, false, ""), "quota");
     assert_eq!(classify("connection reset", 1, false, ""), "transport");
@@ -299,10 +308,15 @@ fn exact_resume_is_zero_calls_but_changed_prompt_executes() {
 fn timeout_kills_subprocess_group_including_grandchildren() {
     let temp = tempfile::tempdir().unwrap();
     let orphan = temp.path().join("orphan");
+    let pidfile = temp.path().join("descendant-pid");
     let path = script(
         temp.path(),
         "tree.sh",
-        &format!("(sleep 1; echo escaped > '{}') &\nwait\n", orphan.display()),
+        &format!(
+            "(sleep 20; echo escaped > '{}') &\necho $! > '{}'\nwait\n",
+            orphan.display(),
+            pidfile.display()
+        ),
     );
     let f = Fixture::new(json!([make_route(
         "tree-cli",
@@ -317,17 +331,27 @@ fn timeout_kills_subprocess_group_including_grandchildren() {
         "tree-cli",
         "task",
         "--timeout",
-        "0.2",
+        "5",
         "--out",
         report.to_str().unwrap(),
     ]);
     failure(&out);
     let status = value(&PathBuf::from(format!("{}.status.json", report.display())));
+    assert_eq!(status["status"], "timeout");
     assert!(
-        status["response"]["seconds"].as_f64().unwrap() < 1.0,
+        status["response"]["seconds"].as_f64().unwrap() < 5.5,
         "request exceeded its own budget"
     );
-    std::thread::sleep(Duration::from_millis(1200));
+    let pid: i32 = fs::read_to_string(pidfile).unwrap().trim().parse().unwrap();
+    let start = Instant::now();
+    while unsafe { libc::kill(pid, 0) } == 0 && start.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_ne!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "grandchild survived timeout"
+    );
     assert!(
         !orphan.exists(),
         "grandchild escaped process group cancellation"
@@ -911,4 +935,73 @@ fn last_message_staging_file_is_masked_after_body_extraction() {
         );
     }
     assert_eq!(fs::read_to_string(output).unwrap(), "[REDACTED]");
+}
+
+#[test]
+fn kimi_fixed_tail_reports_matching_quota_line_in_status() {
+    let tail = include_str!("fixtures/kimi-5h-stderr.txt");
+    assert_eq!(
+        classify(
+            " M request-429-1302.rs\n?? quota exhausted.txt\nunsupported model",
+            1,
+            false,
+            ""
+        ),
+        "error"
+    );
+    let reason = "APIStatusError: 403 You've reached your 5-hour usage limit";
+    assert_eq!(classify(tail, 1, false, ""), "quota");
+    assert_eq!(
+        multi_ai::review::failure_reason(tail, "", "quota", ""),
+        reason
+    );
+    assert_eq!(
+        classify("429 code 1302 too many requests", 1, false, ""),
+        "rate_limit"
+    );
+    assert_eq!(
+        classify(
+            r#"{"code":"insufficient_quota","message":"You exceeded your current quota"}"#,
+            1,
+            false,
+            ""
+        ),
+        "quota"
+    );
+    assert_eq!(
+        classify(
+            "Error [quota] is quoted task text\nunsupported model",
+            1,
+            false,
+            "Error [quota] is quoted task text"
+        ),
+        "error"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = temp.path().join("stderr");
+    fs::write(&fixture, tail).unwrap();
+    let path = script(
+        temp.path(),
+        "quota.sh",
+        &format!("cat '{}' >&2\nexit 1\n", fixture.display()),
+    );
+    let f = Fixture::new(json!([make_route(
+        "kimi-fixture",
+        "fixture-pool",
+        1,
+        &path,
+        "stdout"
+    )]));
+    let out = f.cwd.join("report.md");
+    failure(&f.run(&[
+        "run",
+        "kimi-fixture",
+        "task",
+        "--out",
+        out.to_str().unwrap(),
+    ]));
+    let status = value(&PathBuf::from(format!("{}.status.json", out.display())));
+    assert_eq!(status["status"], "quota");
+    assert_eq!(status["error"], reason);
+    assert!(!out.exists());
 }

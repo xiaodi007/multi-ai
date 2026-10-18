@@ -20,6 +20,9 @@ for platform in .agents .claude; do
   [ -f "$test_home/$platform/skills/multi-ai/SKILL.md" ] || fail "Missing $platform skill"
   [ -x "$test_home/$platform/skills/multi-ai/scripts/run.sh" ] || fail "Runner not executable"
   [ -f "$test_home/$platform/skills/multi-ai/references/delegation.md" ] || fail "Missing $platform delegation reference"
+  [ -f "$test_home/$platform/skills/multi-ai/references/route-traits.md" ] || fail "Missing $platform route traits"
+  [ ! -e "$test_home/$platform/skills/ai-review" ] || fail 'Installed deprecated ai-review skill'
+  [ ! -e "$test_home/$platform/skills/multi-llm-pipeline" ] || fail 'Installed deprecated pipeline skill'
 done
 cat > "$test_root/fake-binary" <<'EOF'
 #!/bin/sh
@@ -96,6 +99,7 @@ for platform in .agents .claude; do
   target="$upgrade_home/$platform/skills/multi-ai"
   cmp "$repo_dir/integration/skills/multi-ai/SKILL.md" "$target/SKILL.md" || fail 'Known old skill not upgraded'
   [ -f "$target/references/delegation.md" ] || fail 'Upgrade omitted reference'
+  [ -f "$target/references/route-traits.md" ] || fail 'Upgrade omitted route traits'
   [ "$(cat "$target/custom.txt")" = user-owned ] || fail 'Upgrade changed unknown file'
 done
 printf '%s\n' 'later user decision' >> "$upgrade_home/.claude/skills/multi-ai/SKILL.md"
@@ -125,4 +129,22 @@ corrupt_backup=$(backup_from "$test_root/corrupt-upgrade.log")
 printf '%s\n' corruption >> "$corrupt_backup/entries/1/before/SKILL.md"
 if sh "$repo_dir/scripts/rollback-agent-skills.sh" "$corrupt_backup" > "$test_root/corrupt-rollback.log" 2>&1; then fail 'Corrupted backup restored'; fi
 cmp "$repo_dir/integration/skills/multi-ai/SKILL.md" "$upgrade_home/.agents/skills/multi-ai/SKILL.md" || fail 'Damaged prior entry was published'
-printf '%s\n' 'PASS: fresh install, forwarding, preservation, safe rollback, v0.1 managed upgrade, merge guide, checksum guards and symlink protection'
+
+# The compatibility updater now upgrades only multi-ai and leaves legacy skill
+# directories and launchers byte-for-byte unchanged.
+canonical_home="$test_root/canonical home"
+mkdir -p "$canonical_home/.claude/skills/ai-review" "$canonical_home/.claude/skills/multi-llm-pipeline/bin" \
+  "$canonical_home/.codex/skills/multi-llm-pipeline" "$canonical_home/.claude/bin"
+for relative in .claude/skills/ai-review/SKILL.md .claude/skills/multi-llm-pipeline/SKILL.md \
+  .claude/skills/multi-llm-pipeline/bin/run.sh .codex/skills/multi-llm-pipeline/SKILL.md .claude/bin/ai-review; do
+  printf '%s\n' "user-owned $relative" > "$canonical_home/$relative"
+done
+sh "$repo_dir/scripts/update-skills.sh" --home "$canonical_home" > "$test_root/canonical-updater.log"
+for relative in .claude/skills/ai-review/SKILL.md .claude/skills/multi-llm-pipeline/SKILL.md \
+  .claude/skills/multi-llm-pipeline/bin/run.sh .codex/skills/multi-llm-pipeline/SKILL.md .claude/bin/ai-review; do
+  [ "$(cat "$canonical_home/$relative")" = "user-owned $relative" ] || fail 'Updater changed a legacy entry'
+done
+for platform in .agents .claude; do
+  [ -f "$canonical_home/$platform/skills/multi-ai/references/route-traits.md" ] || fail 'Updater omitted canonical skill'
+done
+printf '%s\n' 'PASS: fresh install, forwarding, preservation, safe rollback, v0.1 managed upgrade, merge guide, checksum guards, symlink protection, route traits and canonical updater'

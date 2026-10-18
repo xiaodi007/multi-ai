@@ -33,7 +33,7 @@ matches() {
   # Any unknown file, nested directory or symlink makes the whole skill user-owned.
   find "$match_target" -mindepth 1 -print | while IFS= read -r path; do
     case "$path" in
-      "$match_target/SKILL.md"|"$match_target/scripts/run.sh"|"$match_target/agents/openai.yaml"|"$match_target/references/delegation.md")
+      "$match_target/SKILL.md"|"$match_target/scripts/run.sh"|"$match_target/agents/openai.yaml"|"$match_target/references/delegation.md"|"$match_target/references/route-traits.md")
         [ -f "$path" ] && [ ! -L "$path" ] || exit 1
         relative=${path#"$match_target/"}
         awk -F '\t' -v relative="$relative" '$1 == relative { found=1 } END { exit !found }' "$match_entry/files.tsv" || exit 1 ;;
@@ -45,7 +45,7 @@ matches() {
     esac
   done || return 1
   while IFS="$(printf '\t')" read -r relative expected mode; do
-    case "$relative" in SKILL.md|scripts/run.sh|agents/openai.yaml|references/delegation.md) ;; *) return 1 ;; esac
+    case "$relative" in SKILL.md|scripts/run.sh|agents/openai.yaml|references/delegation.md|references/route-traits.md) ;; *) return 1 ;; esac
     file="$match_target/$relative"
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then
       [ "$(cat "$match_entry/status")" != complete ] || return 1
@@ -59,7 +59,7 @@ restore_upgrade() {
   upgrade_target=$1; upgrade_entry=$2
   safe_target "$upgrade_target" || { printf '%s\n' "Preserved changed target: $upgrade_target" >&2; return; }
   while IFS="$(printf '\t')" read -r relative expected mode; do
-    case "$relative" in SKILL.md|scripts/run.sh|agents/openai.yaml|references/delegation.md) ;; *) fail 'Invalid managed backup path' ;; esac
+    case "$relative" in SKILL.md|scripts/run.sh|agents/openai.yaml|references/delegation.md|references/route-traits.md) ;; *) fail 'Invalid managed backup path' ;; esac
     file="$upgrade_target/$relative"; parent=$(dirname -- "$file")
     if [ -L "$parent" ] || [ -L "$file" ] || [ ! -f "$file" ] || [ "$(shasum -a 256 "$file" | awk '{print $1}')" != "$expected" ] || [ "$(stat -f '%Lp' "$file")" != "$mode" ]; then
       printf '%s\n' "Preserved later modification: $file" >&2; continue

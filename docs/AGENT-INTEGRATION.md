@@ -4,11 +4,11 @@
 
 ## 新机器
 
-先按 [README 的 Release 安装步骤](../README.md#从-github-release-安装) 下载、校验并解压 macOS arm64 发布包。私有仓库需要有访问权限的 GitHub 账号；安装 skill 不会替代程序安装。在解压后的发布包中运行：
+本轮功能使用 [README 的源码构建步骤](../README.md#从源码开发与构建) 生成并校验 macOS arm64 本地包；固定 v0.1.0 归档尚无本轮参数。私有仓库需要有访问权限的 GitHub 账号；安装 skill 不会替代程序安装。在解压后的发布包中运行：
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-./install.sh
+./install.sh --no-legacy-aliases
 ./install-skills.sh
 ```
 
@@ -39,7 +39,7 @@ v0.2 的受限调查在每次委派内部启动同一 Rust 程序的 stdio MCP �
 
 优先按所用 Codex 的实际发现目录安装。macOS 验证中的 CLI 和桌面运行时 0.160.0 的 `skills/list` 行为是：默认目录与旧目录各放一份同名 skill，会列出两个启用条目，不会跨目录去重。不要把双目录复制作为通用安装步骤；仅保留默认目录时，两种运行时均已发现唯一启用入口。不同版本的发现及去重行为应以自己的技能列表核验。
 
-已有 `multi-llm-pipeline`、`ai-review` 技能保留。`install-skills.sh` 用于新建独立 `multi-ai` 技能；`update-skills.sh` 用于迁移已有旧技能。前者默认保留整个已存在的 `multi-ai` 目录，不覆盖用户修改，即使该目录尚无 `SKILL.md` 也会提示保留。
+统一使用独立 `multi-ai` 技能。安装包不再包含或更新 `multi-llm-pipeline`、`ai-review` 技能；已有旧目录和调用点交由宿主迁移，不自动删除。`install-skills.sh` 用于安装独立技能，`update-skills.sh` 只转发其 `--upgrade`。前者默认保留整个已存在的 `multi-ai` 目录，不覆盖用户修改，即使该目录尚无 `SKILL.md` 也会提示保留。
 
 已有独立 multi-ai skill 可显式升级受管理文件：
 
@@ -47,7 +47,7 @@ v0.2 的受限调查在每次委派内部启动同一 Rust 程序的 stdio MCP �
 ./install-skills.sh --upgrade
 ```
 
-升级只替换内容哈希和权限均匹配已发布 v0.1 或当前模板的文件，先备份再逐个发布，入口 `SKILL.md` 最后更新。被用户修改的文件和未知文件保留；输出 `MERGE_GUIDE=…` 指向需手工合并的位置。新增 `references/delegation.md` 随安装／升级进入 skill 目录。不会通过本地“已管理”标记把未知内容当成受管理文件。
+升级只替换内容哈希和权限均匹配已发布 v0.1 或当前模板的文件，先备份再逐个发布，入口 `SKILL.md` 最后更新。被用户修改的文件和未知文件保留；输出 `MERGE_GUIDE=…` 指向需手工合并的位置。`references/delegation.md` 与 `references/route-traits.md` 随安装／升级进入 skill 目录。不会通过本地“已管理”标记把未知内容当成受管理文件。
 
 ## 诊断与回退
 
@@ -65,7 +65,7 @@ skill 安装输出独立的 `BACKUP_DIR=…`，回退命令是：
 ./rollback-agent-skills.sh /该次安装输出的/BACKUP_DIR
 ```
 
-它只删除该次新建且仍未改动的技能；任何修改、额外文件、替换符号链接或父目录变化都会保留整个技能目录。原本已有的技能从未被覆盖。保留备份记录，并先回退技能，再回退程序安装。旧技能迁移仍使用单独的 `rollback-skills.sh`。
+它只删除该次新建且仍未改动的技能；任何修改、额外文件、替换符号链接或父目录变化都会保留整个技能目录。原本已有的技能从未被覆盖。保留备份记录，并先回退技能，再回退程序安装。历史旧技能备份可继续用 `rollback-skills.sh` 恢复；该脚本不安装技能。
 
 对于 `--upgrade` 的备份，回退按文件检查安装后哈希和权限：未改动的文件恢复原内容及权限，新加且未改动的文件删除；之后修改的文件保留。原文件备份也校验哈希，拒绝损坏的备份。未知文件和已变化的父目录不处理。
 

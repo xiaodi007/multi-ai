@@ -16,6 +16,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Read,
     os::fd::AsRawFd,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -183,13 +184,31 @@ pub(crate) fn blocked(pool: &str) -> Option<Value> {
     }
 }
 
+fn workspace_status_line(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() >= 3
+        && bytes[2] == b' '
+        && b" MADRCU?!T".contains(&bytes[0])
+        && b" MADRCU?!T".contains(&bytes[1])
+}
+
 /// Do not classify input-size problems as wallet exhaustion, or echoed prompts as errors.
 pub fn classify(text: &str, rc: i32, timed_out: bool, prompt: &str) -> String {
     if timed_out {
         return "timeout".into();
     }
-    let re=Regex::new(r"Error \[(truncated|incomplete|empty|headers_timeout|idle_timeout|total_timeout|auth|quota|transport)\]").unwrap();
-    if let Some(c) = re.captures(text) {
+    let clean = if prompt.is_empty() {
+        text.to_owned()
+    } else {
+        text.replace(prompt, "\n")
+    };
+    let clean = clean
+        .lines()
+        .filter(|line| !workspace_status_line(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let re=Regex::new(r"Error \[(truncated|incomplete|empty|headers_timeout|idle_timeout|total_timeout|auth|quota|rate_limit|transport|cancelled)\]").unwrap();
+    if let Some(c) = re.captures_iter(&clean).last() {
         return if c[1].ends_with("timeout") {
             "timeout".into()
         } else {
@@ -199,11 +218,6 @@ pub fn classify(text: &str, rc: i32, timed_out: bool, prompt: &str) -> String {
     if rc == 0 {
         return "ok".into();
     }
-    let clean = if prompt.is_empty() {
-        text.to_owned()
-    } else {
-        text.replace(prompt, "\n")
-    };
     for (kind, pattern) in [
         (
             "error",
@@ -211,7 +225,11 @@ pub fn classify(text: &str, rc: i32, timed_out: bool, prompt: &str) -> String {
         ),
         (
             "quota",
-            r"(?i)429|402|rate.?limit|quota (exceeded|exhausted)|insufficient (balance|quota|credit)|usage limit|limit exceeded|too many requests|余额不足|额度(不足|用尽|超限)|限额",
+            r"(?i)402|quota[_ ](exceeded|exhausted)|insufficient[_ ](balance|quota|credit)|exceeded.{0,40}quota|usage limit|余额不足|额度(不足|用尽|超限)|限额",
+        ),
+        (
+            "rate_limit",
+            r"(?i)429|1302|rate.?limit|too many requests|limit exceeded",
         ),
         (
             "auth",
@@ -227,6 +245,31 @@ pub fn classify(text: &str, rc: i32, timed_out: bool, prompt: &str) -> String {
         }
     }
     "error".into()
+}
+/// Select the diagnostic that actually explains classification, even after workspace echoes.
+pub fn failure_reason(stderr: &str, stdout: &str, kind: &str, prompt: &str) -> String {
+    for stream in [stderr, stdout] {
+        let clean = if prompt.is_empty() {
+            stream.to_owned()
+        } else {
+            stream.replace(prompt, "\n")
+        };
+        if let Some(line) = clean.lines().rev().find(|line| {
+            !line.trim().is_empty()
+                && !workspace_status_line(line)
+                && classify(line, 1, false, "") == kind
+        }) {
+            return line.trim().chars().take(1600).collect();
+        }
+    }
+    stderr
+        .lines()
+        .chain(stdout.lines())
+        .rfind(|line| !line.trim().is_empty())
+        .unwrap_or("CLI failed without diagnostic output")
+        .chars()
+        .take(1600)
+        .collect()
 }
 fn parse_time(v: &Value) -> Option<f64> {
     v.as_f64().or_else(|| {
@@ -329,6 +372,7 @@ fn snapshot_wait(pool: &str) -> Option<f64> {
 }
 pub(crate) fn cool_down(pool: &str, kind: &str, detail: &str) -> Result<()> {
     let default = match kind {
+        "quota" if Regex::new(r"(?i)5[- ]hour|5h").unwrap().is_match(detail) => 300.0,
         "quota" => 60.0,
         "auth" => 240.0,
         "transport" => 5.0,
@@ -439,17 +483,12 @@ fn backups(
     all.retain(|r| !pools.contains(r.pool.as_str()));
     all
 }
-fn executable_exists(name: &str) -> bool {
+pub(crate) fn resolve_executable(name: &str, config: Option<&Config>) -> Option<PathBuf> {
+    let executable = |path: &Path| {
+        fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
     if name.contains('/') {
-        return Path::new(name).is_file();
-    }
-    std::env::var_os("PATH")
-        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
-}
-fn resolve_executable(name: &str, config: Option<&Config>) -> Option<PathBuf> {
-    if name.contains('/') {
-        return Path::new(name)
-            .is_file()
+        return executable(Path::new(name))
             .then(|| fs::canonicalize(name).ok())
             .flatten();
     }
@@ -459,7 +498,7 @@ fn resolve_executable(name: &str, config: Option<&Config>) -> Option<PathBuf> {
         .or_else(|| std::env::var_os("PATH"))?;
     std::env::split_paths(&path)
         .map(|p| p.join(name))
-        .find(|p| p.is_file())
+        .find(|p| executable(p))
         .and_then(|p| fs::canonicalize(p).ok())
 }
 fn script_bytes(path: &Path) -> Result<Vec<u8>> {
@@ -651,10 +690,7 @@ fn cli_identity(r: &Route, config: &Config, args: &Args) -> Result<(Value, bool)
             candidates.push(PathBuf::from(value));
         }
     }
-    let explicit_model = r
-        .argv
-        .windows(2)
-        .any(|p| ["-m", "--model"].contains(&p[0].as_str()) && !p[1].contains('{'));
+    let explicit_model = r.explicit_model().is_some();
     let default_key = if ["kimi", "kimi-k3"].contains(&r.legacy_id.as_str()) {
         "default_model"
     } else {
@@ -825,13 +861,14 @@ fn log_snapshot(
     }
     attempt.write(file, &clean.as_bytes()[..clean.len() - hold])
 }
-async fn execute_cli_env(
+pub(crate) async fn execute_cli_env(
     r: &Route,
     args: &Args,
     prompt: &str,
     attempt: &Attempt,
     config: Option<&Config>,
 ) -> Result<Value> {
+    attempt.update(json!({"route":r.id,"inputBytes":prompt.len()}))?;
     let total = numeric(args, "timeout", r.default_timeout as f64)?;
     let secrets = secret_values(config, Some(r));
     let idle = numeric(args, "idle-timeout", 0.0)?;
@@ -842,7 +879,12 @@ async fn execute_cli_env(
     let _request_cleanup = RequestCleanup(promptfile.clone());
     attempt.write("request.txt", prompt.as_bytes())?;
     let outfile = attempt.dir.join("last-message.txt");
-    let cli_prompt = if r.agentic && prompt.len() > 32768 {
+    let cli_prompt = if args.has("implementation-task") && prompt.len() > 32768 {
+        format!(
+            "请完整读取任务文件 {}，按文件内要求实施并验证修改。不得提交或写入指定工作目录之外；交回实施摘要与验证结果。",
+            promptfile.display()
+        )
+    } else if r.agentic && prompt.len() > 32768 {
         format!(
             "请完整读取任务材料文件 {}，按文件内要求进行只读取证／复核。交回最终正文与覆盖限制。",
             promptfile.display()
@@ -864,13 +906,13 @@ async fn execute_cli_env(
         })
         .collect();
     let first = argv.first().context("通路缺少argv")?;
-    if !executable_exists(first) {
+    let Some(executable) = resolve_executable(first, config) else {
         let _ = fs::remove_file(&promptfile);
         return Ok(
             json!({"status":"missing","error":format!("找不到可执行文件：{first}"),"content":"","complete":false,"seconds":0.0}),
         );
-    }
-    let mut c = Command::new(first);
+    };
+    let mut c = Command::new(executable);
     c.args(&argv[1..])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1005,24 +1047,13 @@ async fn execute_cli_env(
             last.elapsed().as_secs_f64()
         )
     } else if kind != "ok" {
-        let raw = if stderr.trim().is_empty() {
-            stdout.trim()
-        } else {
-            stderr.trim()
-        };
-        raw.chars()
-            .rev()
-            .take(1600)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect()
+        failure_reason(&stderr, &stdout, &kind, prompt)
     } else {
         String::new()
     };
     let error = mask(&error, &secrets);
     Ok(
-        json!({"status":kind,"content":body,"complete":kind=="ok","error":error,"seconds":(start.elapsed().as_secs_f64()*10.0).round()/10.0,"exitCode":status.code()}),
+        json!({"route":r.id,"inputBytes":prompt.len(),"outputBytes":body.len(),"status":kind,"content":body,"complete":kind=="ok","error":error,"seconds":(start.elapsed().as_secs_f64()*10.0).round()/10.0,"exitCode":status.code()}),
     )
 }
 fn has_tools(v: &Value) -> bool {
@@ -1054,7 +1085,7 @@ fn extract_output(r: &Route, stdout: &str, outfile: &Path) -> Result<String> {
     }
 }
 
-async fn run_one(
+pub(crate) async fn run_one(
     config: &Config,
     r: &Route,
     args: &Args,
@@ -1065,6 +1096,9 @@ async fn run_one(
     let start = Instant::now();
     let attempt = ctx.attempt(&r.id)?;
     let mut result = json!({"provider":name(r,legacy),"route":r.id,"pool":r.pool,"family":r.family,"label":r.label,"status":"error","output":"","error":"","seconds":0.0,"artifacts":attempt.dir,"run_id":ctx.run_id,"attempt_id":attempt.id,"complete":false});
+    if r.api_alias.is_none() {
+        result["inputBytes"] = json!(prompt.len());
+    }
     let total = numeric(args, "timeout", r.default_timeout as f64)?;
     let idle = numeric(args, "idle-timeout", 0.0)?;
     if total <= 0.0
@@ -1088,6 +1122,9 @@ async fn run_one(
         return Ok(result);
     }
     let mut api_args = args.clone();
+    if args.has("rate-limit-retries") {
+        api_args.set("retries", args.number("rate-limit-retries", 2)?);
+    }
     api_args.set("timeout-ms", (total * 1000.0).max(50.0) as u64);
     if idle > 0.0 {
         api_args.set("idle-timeout-ms", (idle * 1000.0) as u64);
@@ -1096,7 +1133,12 @@ async fn run_one(
         api_args.set("headers-timeout-ms", (h.parse::<f64>()? * 1000.0) as u64);
     }
     let (resolved, model_identity_known) = if let Some(alias) = &r.api_alias {
-        (config.alias_metadata(alias, &api_args)?, true)
+        let mut identity_args = api_args.clone();
+        identity_args.set(
+            "timeout-ms",
+            (numeric(args, "policy-timeout", total)? * 1000.0).max(50.0) as u64,
+        );
+        (config.alias_metadata(alias, &identity_args)?, true)
     } else {
         cli_identity(r, config, args)?
     };
@@ -1132,7 +1174,7 @@ async fn run_one(
     } else {
         None
     };
-    let identity = json!({"version":env!("CARGO_PKG_VERSION"),"engineSha256":engine_sha()?,"implementation":"rust-native-v1","provider":r.id,"routeConfigSha256":sha(&serde_json::to_vec(r)?),"configSha256":sha(&serde_json::to_vec(&json!({"routes":config.routes,"profiles":config.profiles}))?),"promptSha256":sha(prompt.as_bytes()),"cwd":fs::canonicalize(&cwd).unwrap_or(cwd),"sourceId":args.get("source-id"),"workspace":workspace,"timeout":total,"idleTimeout":idle,"headersTimeout":args.get("headers-timeout"),"maxTokens":args.get("max-tokens"),"resolved":resolved});
+    let identity = json!({"version":env!("CARGO_PKG_VERSION"),"engineSha256":engine_sha()?,"implementation":"rust-native-v1","provider":r.id,"routeConfigSha256":sha(&serde_json::to_vec(r)?),"configSha256":sha(&serde_json::to_vec(&json!({"routes":config.routes,"profiles":config.profiles}))?),"promptSha256":sha(prompt.as_bytes()),"cwd":fs::canonicalize(&cwd).unwrap_or(cwd),"sourceId":args.get("source-id"),"workspace":workspace,"timeout":numeric(args,"policy-timeout",total)?,"idleTimeout":idle,"headersTimeout":args.get("headers-timeout"),"maxTokens":args.get("max-tokens"),"resolved":resolved});
     attempt.update(json!({"inputIdentity":identity,"promptSha256":sha(prompt.as_bytes()),"inputAttached":attached,"textReady":args.has("text-ready")}))?;
     if args.has("resume") && cache_disabled_reason.is_none() {
         let path = cache.as_ref().context("恢复需要 --out 或 --outdir")?;
@@ -1152,6 +1194,11 @@ async fn run_one(
             r.id
         );
     }
+    if args.has("cache-only") {
+        result["status"] = json!("cache_miss");
+        attempt.finish("cache_miss", result.clone())?;
+        return Ok(result);
+    }
     if !args.has("ignore-cooldown")
         && let Some(entry) = blocked(&r.pool)
     {
@@ -1165,10 +1212,22 @@ async fn run_one(
         attempt.finish("cooldown", result.clone())?;
         return Ok(result);
     }
+    let remaining = total - start.elapsed().as_secs_f64();
+    if remaining <= 0.0 {
+        result["status"] = json!("timeout");
+        result["model_calls"] = json!(0);
+        result["error"] = json!("total_timeout: identity/setup exhausted budget before invocation");
+        result["seconds"] = json!(start.elapsed().as_secs_f64());
+        attempt.finish("timeout", result.clone())?;
+        return Ok(result);
+    }
+    let mut execution_args = args.clone();
+    execution_args.set("timeout", remaining);
+    api_args.set("timeout-ms", (remaining * 1000.0).max(1.0) as u64);
     let response = if let Some(alias) = &r.api_alias {
         api::execute_alias(config, alias, &api_args, prompt, &attempt).await
     } else {
-        execute_cli_env(r, args, prompt, &attempt, Some(config)).await
+        execute_cli_env(r, &execution_args, prompt, &attempt, Some(config)).await
     };
     match response {
         Ok(v) => {
@@ -1185,6 +1244,9 @@ async fn run_one(
             result["output"] = json!(if status == "ok" && complete { body } else { "" });
             result["complete"] = json!(status == "ok" && complete);
             result["error"] = json!(s(&v, "error"));
+            if let Some(bytes) = v["inputBytes"].as_u64() {
+                result["inputBytes"] = json!(bytes);
+            }
             result["response"] = v;
         }
         Err(e) => {
@@ -1198,6 +1260,7 @@ async fn run_one(
         result["complete"] = json!(false);
         result["error"] = json!("没有完整最终正文");
     }
+    result["outputBytes"] = json!(s(&result, "output").len());
     result["seconds"] = json!((start.elapsed().as_secs_f64() * 10.0).round() / 10.0);
     if matches!(s(&result, "status"), "quota" | "auth" | "transport") {
         cool_down(&r.pool, s(&result, "status"), s(&result, "error"))?;
@@ -1212,7 +1275,110 @@ async fn run_one(
     }
     Ok(result)
 }
-fn without_output(v: &Value) -> Value {
+pub(crate) async fn resume_candidate(
+    config: &Config,
+    routes: &[Route],
+    args: &Args,
+    prompt: &str,
+    ctx: &OutputContext,
+    legacy: bool,
+) -> Result<Option<Value>> {
+    if !args.has("resume") {
+        return Ok(None);
+    }
+    let Some(first) = routes.first() else {
+        return Ok(None);
+    };
+    let Some(path) = cache_path(ctx, first) else {
+        return Ok(None);
+    };
+    let Some(cached) = read_json(&path) else {
+        return Ok(None);
+    };
+    let Some(route) = routes.iter().find(|r| cached["result"]["route"] == r.id) else {
+        return Ok(None);
+    };
+    let mut probe = args.clone();
+    let budget = numeric(args, "timeout", first.default_timeout as f64)?;
+    probe.set("timeout", budget);
+    probe.set("policy-timeout", budget);
+    probe.flags.insert("cache-only".into());
+    let result = run_one(config, route, &probe, prompt, ctx, legacy).await?;
+    Ok((result["cached"] == true).then_some(result))
+}
+/// Per-route retry budget includes backoff; quota is never retried here.
+pub(crate) async fn run_retry(
+    config: &Config,
+    r: &Route,
+    args: &Args,
+    prompt: &str,
+    ctx: &OutputContext,
+    legacy: bool,
+) -> Result<Value> {
+    let start = Instant::now();
+    let total = numeric(args, "timeout", r.default_timeout as f64)?;
+    if total <= 0.0 {
+        bail!("timeout must be finite and positive");
+    }
+    let retries = args.number("rate-limit-retries", 2)?;
+    let delay = args.number("retry-delay-ms", 500)?;
+    let mut attempts = Vec::new();
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    for index in 0..=retries {
+        let remaining = total - start.elapsed().as_secs_f64();
+        if remaining <= 0.0 {
+            return Ok(
+                json!({"route":r.id,"pool":r.pool,"status":"timeout","complete":false,"model_calls":0,"error":"total_timeout: retry budget exhausted before next invocation","policySeconds":start.elapsed().as_secs_f64(),"attempts":attempts}),
+            );
+        }
+        let mut options = args.clone();
+        if !options.has("policy-timeout") {
+            options.set("policy-timeout", total);
+        }
+        // API already implements bounded retries inside its total request deadline.
+        options.set("timeout", remaining);
+        let mut result = run_one(config, r, &options, prompt, ctx, legacy).await?;
+        attempts.push(without_output(&result));
+        if result["status"] != "rate_limit" || r.api_alias.is_some() || index == retries {
+            result["policySeconds"] = json!(start.elapsed().as_secs_f64());
+            result["attempts"] = json!(attempts);
+            return Ok(result);
+        }
+        let wait = Duration::from_millis(delay.saturating_mul(1u64 << index.min(16)));
+        if start.elapsed().as_secs_f64() + wait.as_secs_f64() >= total {
+            result["status"] = json!("timeout");
+            result["complete"] = json!(false);
+            result["error"] =
+                json!("total_timeout: rate-limit backoff exceeds remaining seconds budget");
+            result["policySeconds"] = json!(start.elapsed().as_secs_f64());
+            result["attempts"] = json!(attempts);
+            return Ok(result);
+        }
+        eprintln!(
+            "[{}] rate_limit，{}ms 后重试 {}/{}",
+            r.id,
+            wait.as_millis(),
+            index + 1,
+            retries
+        );
+        let cancelled = tokio::select! {
+            _ = tokio::time::sleep(wait) => false,
+            _ = interrupt.recv() => true,
+            _ = terminate.recv() => true,
+        };
+        if cancelled {
+            result["status"] = json!("cancelled");
+            result["complete"] = json!(false);
+            result["error"] = json!("cancelled during rate-limit backoff");
+            result["policySeconds"] = json!(start.elapsed().as_secs_f64());
+            result["attempts"] = json!(attempts);
+            return Ok(result);
+        }
+    }
+    unreachable!()
+}
+pub(crate) fn without_output(v: &Value) -> Value {
     let mut v = v.clone();
     if let Some(o) = v.as_object_mut() {
         o.remove("output");
@@ -1261,9 +1427,36 @@ pub async fn command(config: &Config, command: &str, args: &Args, legacy: bool) 
                 args.positional.first().context("run需要指定通路")?,
                 legacy,
             )?;
+            let mut routes = vec![r.clone()];
+            for id in args.all("fallback") {
+                routes.push(route(config, &id, legacy)?.clone());
+            }
+            let budget = numeric(args, "timeout", r.default_timeout as f64)?;
+            if budget <= 0.0 {
+                bail!("timeout must be finite and positive");
+            }
             let ctx = OutputContext::new(args, command, false)?;
             let prompt = read_prompt(args, 1)?;
-            let v = run_one(config, r, args, &prompt, &ctx, legacy).await?;
+            let restored = resume_candidate(config, &routes, args, &prompt, &ctx, legacy).await?;
+            let mut v = restored.clone().unwrap_or_else(|| json!({}));
+            let mut history = Vec::new();
+            let started = Instant::now();
+            for candidate in routes.iter().filter(|_| restored.is_none()) {
+                let seconds = budget - started.elapsed().as_secs_f64();
+                if seconds <= 0.0 {
+                    v = json!({"route":candidate.id,"pool":candidate.pool,"status":"timeout","complete":false,"model_calls":0,"error":"total_timeout: task budget exhausted before fallback"});
+                    break;
+                }
+                let mut remaining = args.clone();
+                remaining.set("policy-timeout", budget);
+                remaining.set("timeout", seconds);
+                v = run_retry(config, candidate, &remaining, &prompt, &ctx, legacy).await?;
+                history.push(without_output(&v));
+                if !matches!(s(&v, "status"), "quota" | "cooldown") {
+                    break;
+                }
+            }
+            v["route_attempts"] = json!(history);
             ctx.save_status(without_output(&v))?;
             let rc = if v["status"] == "ok" {
                 if ctx.output.is_some() {
@@ -1421,7 +1614,7 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
         ctx: &OutputContext,
         legacy: bool,
     ) -> (Route, Result<Value>) {
-        let v = run_one(config, &r, args, prompt, ctx, legacy).await;
+        let v = run_retry(config, &r, args, prompt, ctx, legacy).await;
         (r, v)
     }
     let mut jobs = FuturesUnordered::new();
@@ -1460,6 +1653,7 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
                 && matches!(
                     s(&v, "status"),
                     "quota"
+                        | "rate_limit"
                         | "auth"
                         | "transport"
                         | "timeout"
@@ -1597,7 +1791,7 @@ async fn verify(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
         eprintln!("未声明出具方，请明确 --exclude；模型判定不等于人工采纳。");
     }
     let prompt = append_material(format!("{VERIFY_TEMPLATE}{findings}"), args)?;
-    let v = run_one(config, &r, args, &prompt, &ctx, legacy).await?;
+    let v = run_retry(config, &r, args, &prompt, &ctx, legacy).await?;
     ctx.save_status(without_output(&v))?;
     if v["status"] != "ok" {
         eprintln!("[{}] {}: {}", r.id, s(&v, "status"), s(&v, "error"));

@@ -6,10 +6,13 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 binary=''
 legacy_profiles="${HOME:?HOME is required}/.claude/skills/multi-llm-pipeline/references/model-profiles.json"
 legacy_explicit=0
+managed_entries='multi-ai ai-review llm-run'
 usage() {
   cat <<'EOF'
-Usage: install.sh [--binary FILE] [--legacy-profiles FILE]
+Usage: install.sh [--binary FILE] [--legacy-profiles FILE] [--no-legacy-aliases]
 Install multi-ai on macOS Apple Silicon. Existing config is preserved.
+--no-legacy-aliases installs only multi-ai, preserving existing legacy entries.
+ai-review and llm-run are deprecated compatibility aliases.
 The successful installation prints BACKUP_DIR for rollback.sh.
 EOF
 }
@@ -20,6 +23,7 @@ while [ "$#" -gt 0 ]; do
       option=$1; shift; [ "$#" -gt 0 ] || fail "$option needs a file"
       if [ "$option" = --binary ]; then binary=$1; else legacy_profiles=$1; legacy_explicit=1; fi ;;
     --help|-h) usage; exit 0 ;;
+    --no-legacy-aliases) managed_entries=multi-ai ;;
     *) fail "Unknown argument: $1" ;;
   esac
   shift
@@ -53,7 +57,7 @@ safe_path() {
 '*|*"$(printf '\t')"*) fail "Paths containing tabs or newlines are unsupported" ;; esac
 }
 for value in "$install_home" "$bin_dir" "$config_dir" "$state_dir" "$lib_dir" "$binary" "$legacy_profiles"; do safe_path "$value"; done
-for name in multi-ai ai-review llm-run; do
+for name in $managed_entries; do
   if [ -d "$bin_dir/$name" ] && [ ! -L "$bin_dir/$name" ]; then fail "Refusing to replace directory: $bin_dir/$name"; fi
 done
 for name in profiles.json routes.json; do
@@ -66,7 +70,9 @@ chmod 700 "$state_dir/backups"
 backup_dir=$(mktemp -d "$state_dir/backups/install-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
 chmod 700 "$backup_dir"
 mkdir "$backup_dir/entries" "$backup_dir/config"
-printf '%s\n' 1 > "$backup_dir/manifest.version"
+printf '%s\n' 2 > "$backup_dir/manifest.version"
+for name in $managed_entries; do printf '%s\n' "$name"; done > "$backup_dir/managed-entries"
+shasum -a 256 "$backup_dir/managed-entries" | awk '{print $1}' > "$backup_dir/managed-entries.sha256"
 printf '%s\n' "$install_home" > "$backup_dir/home"
 printf '%s\n' "$config_dir" > "$backup_dir/config_dir"
 printf '%s\n' "$installed" > "$backup_dir/installed_binary"
@@ -87,7 +93,7 @@ snapshot() {
     printf '%s\n' absent > "$destination.kind"
   fi
 }
-for name in multi-ai ai-review llm-run; do snapshot "$bin_dir/$name" "$backup_dir/entries/$name"; done
+for name in $managed_entries; do snapshot "$bin_dir/$name" "$backup_dir/entries/$name"; done
 for name in profiles.json routes.json; do snapshot "$config_dir/$name" "$backup_dir/config/$name"; done
 snapshot "$installed" "$backup_dir/binary"
 shasum -a 256 "$binary" | awk '{print $1}' > "$backup_dir/binary.after.sha256"
@@ -129,7 +135,7 @@ for name in profiles.json routes.json; do
 done
 [ "$config_status" -eq 0 ] || fail "Config import failed; see $backup_dir/install-config.log"
 
-for name in multi-ai ai-review llm-run; do
+for name in $managed_entries; do
   rm -f "$bin_dir/$name"
   ln -s "$installed" "$bin_dir/$name"
 done

@@ -22,9 +22,6 @@ mkdir -p "$stage/$package_name/bin" "$stage/$package_name/docs" "$stage/$package
 cp -p "$binary" "$stage/$package_name/bin/multi-ai"
 cp -p "$script_dir/install.sh" "$script_dir/rollback.sh" "$script_dir/update-skills.sh" "$script_dir/rollback-skills.sh" \
   "$script_dir/install-skills.sh" "$script_dir/rollback-agent-skills.sh" "$stage/$package_name/"
-for name in claude-ai-review.md claude-pipeline.md claude-run.sh codex-pipeline.md codex-run.sh; do
-  cp -p "$repo_dir/integration/skills/$name" "$stage/$package_name/integration/skills/$name"
-done
 cp -Rp "$repo_dir/integration/skills/multi-ai" "$stage/$package_name/integration/skills/"
 cp -p "$repo_dir/README.md" "$stage/$package_name/"
 cp -p "$repo_dir/docs/COMPATIBILITY.md" "$stage/$package_name/docs/"
@@ -38,10 +35,9 @@ chmod 755 "$stage/$package_name/install-skills.sh" "$stage/$package_name/rollbac
 (
   cd "$stage/$package_name"
   shasum -a 256 bin/multi-ai install.sh rollback.sh update-skills.sh rollback-skills.sh install-skills.sh rollback-agent-skills.sh README.md docs/COMPATIBILITY.md docs/AGENT-INTEGRATION.md docs/DELEGATION.md docs/CLI-ISOLATION.md docs/VALIDATION-v0.2.md docs/TOKEN-BENCHMARK-v0.2.md \
-    integration/skills/claude-ai-review.md integration/skills/claude-pipeline.md integration/skills/claude-run.sh \
-    integration/skills/codex-pipeline.md integration/skills/codex-run.sh integration/skills/multi-ai/SKILL.md \
+    integration/skills/multi-ai/SKILL.md \
     integration/skills/multi-ai/scripts/run.sh integration/skills/multi-ai/agents/openai.yaml \
-    integration/skills/multi-ai/references/delegation.md > SHA256SUMS
+    integration/skills/multi-ai/references/delegation.md integration/skills/multi-ai/references/route-traits.md > SHA256SUMS
   shasum -a 256 -c SHA256SUMS
 )
 archive="$repo_dir/dist/$package_name.tar.gz"

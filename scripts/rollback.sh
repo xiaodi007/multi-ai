@@ -11,7 +11,21 @@ fi
 [ "$#" -eq 1 ] || fail 'Usage: rollback.sh BACKUP_DIR'
 backup_dir=$1
 [ -d "$backup_dir" ] && [ -f "$backup_dir/manifest.version" ] || fail 'Not an installation backup'
-[ "$(cat "$backup_dir/manifest.version")" = 1 ] || fail 'Unsupported backup version'
+case "$(cat "$backup_dir/manifest.version")" in
+  1) managed_entries='multi-ai ai-review llm-run' ;;
+  2)
+    for name in managed-entries managed-entries.sha256; do
+      [ -f "$backup_dir/$name" ] && [ ! -L "$backup_dir/$name" ] || fail "Missing regular backup metadata: $name"
+    done
+    [ "$(shasum -a 256 "$backup_dir/managed-entries" | awk '{print $1}')" = "$(cat "$backup_dir/managed-entries.sha256")" ] || fail 'Managed entry checksum mismatch'
+    managed_entries=$(cat "$backup_dir/managed-entries")
+    case "$managed_entries" in
+      multi-ai) ;;
+      "$(printf '%s\n' multi-ai ai-review llm-run)") ;;
+      *) fail 'Invalid managed entry list' ;;
+    esac ;;
+  *) fail 'Unsupported backup version' ;;
+esac
 [ "$(cat "$backup_dir/uid")" = "$(id -u)" ] || fail 'Backup belongs to another user'
 install_home=$(cat "$backup_dir/home")
 config_dir=$(cat "$backup_dir/config_dir")
@@ -42,7 +56,7 @@ matches_snapshot() {
     *) return 1 ;;
   esac
 }
-for name in multi-ai ai-review llm-run; do
+for name in $managed_entries; do
   target="$bin_dir/$name"
   if [ -L "$target" ] && [ "$(readlink "$target")" = "$installed" ]; then
     restore "$target" "$backup_dir/entries/$name"

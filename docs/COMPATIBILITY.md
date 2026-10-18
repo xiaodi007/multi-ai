@@ -2,9 +2,9 @@
 
 首版支持并验收 macOS Apple Silicon，二进制目标为 `aarch64-apple-darwin`。其他系统或架构不据此声明支持。
 
-## 两个旧入口
+## 两个旧入口（已弃用）
 
-安装后的 `multi-ai`、`ai-review` 和 `llm-run` 指向同一 Rust 二进制。程序依据调用入口保留语义：
+统一使用 `multi-ai`。`install.sh --no-legacy-aliases` 只管理新入口并保留机器上已有别名；默认安装仍兼容三个名字。`ai-review` 和 `llm-run` 的分派暂不删除，它们指向同一 Rust 二进制。程序依据调用入口保留语义：
 
 | 原接口 | Rust 入口 | 保留行为 |
 |---|---|---|
@@ -67,3 +67,7 @@ CLI 通路仍使用厂商程序、登录和工具能力。仅缺少某个 CLI �
 新委派整代产物通过latest.json指针读取，失败保留上一代。feedback仍绑定完整报告哈希。v0.2实现版本参与缓存身份，升级后旧缓存可能重新调用。invocations指外部适配执行次数，CLI内部模型请求不等于一次。
 
 详情：[委派指南](DELEGATION.md)。其它架构与系统尚未声明支持。
+
+# 2026-10-18 增量
+
+新增 batch、stats 和 delegate implement codex-cli；run 可显式 --fallback，quota 与 rate_limit 分开，run/review/verify/batch 共享限流重试。原 run/review/verify 秒单位、text/llm-run 毫秒单位不变。batch恢复仍要求完整身份和正文哈希；实施有副作用，不提供resume，不自动提交。实施使用 Codex 原生 workspace-write 加事后 Git/mtime 核对，不套外层系统 sandbox，也不覆盖网络配置；越界变化记为 boundary_violation，只报告不回滚，监测范围与盲区见 [README](../README.md#受控实施)。旧技能模板已移除，技能安装与升级只面向 multi-ai，历史rollback仍可使用。

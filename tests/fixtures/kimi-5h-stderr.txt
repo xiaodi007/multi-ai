@@ -1,0 +1,9 @@
+Working directory status:
+ M src/example.rs
+?? notes.md
+APIStatusError: 403 You've reached your 5-hour usage limit
+Working directory status after failure:
+ M src/example.rs
+?? unrelated-workspace-fragment.md
+?? quota exhausted.txt
+ M request-429-1302.rs

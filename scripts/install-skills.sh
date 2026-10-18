@@ -5,7 +5,7 @@ umask 077
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 install_home=${HOME:?HOME is required}
 templates=''; codex_dir=''; claude_dir=''; platforms=both; upgrade=0
-managed_paths='scripts/run.sh agents/openai.yaml references/delegation.md SKILL.md'
+managed_paths='scripts/run.sh agents/openai.yaml references/delegation.md references/route-traits.md SKILL.md'
 usage() {
   cat <<'EOF'
 Usage: install-skills.sh [--home DIR] [--codex-dir DIR] [--claude-dir DIR]

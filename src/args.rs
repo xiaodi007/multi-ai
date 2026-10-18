@@ -29,6 +29,7 @@ impl Args {
             "human-confirmed",
             "agentic",
             "ignore-cooldown",
+            "allow-dirty",
         ];
         let mut result = Self {
             raw: tokens.to_vec(),

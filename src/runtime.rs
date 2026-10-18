@@ -324,6 +324,36 @@ impl OutputContext {
         ctx.save_status(json!({"status":"running","command":command}))?;
         Ok(ctx)
     }
+    /// A batch owns the whole directory lock before constructing any job outputs.
+    pub fn job_output(&self, id: &str) -> Result<Self> {
+        if !safe_id(id) {
+            bail!("invalid job id: {id}");
+        }
+        let root = self.outdir.as_ref().context("batch requires --outdir")?;
+        let output = root.join(format!("{id}.md"));
+        let status = root.join(format!("{id}.md.status.json"));
+        let paths = vec![
+            output.clone(),
+            status.clone(),
+            root.join(format!("{id}.md.cache.json")),
+            root.join(format!("{id}.md.partial")),
+        ];
+        for path in &paths {
+            if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink() || !m.is_file())
+            {
+                bail!(
+                    "managed job output must be a regular file: {}",
+                    path.display()
+                );
+            }
+        }
+        self.archive(&paths)?;
+        let mut child = self.clone();
+        child.output = Some(output);
+        child.outdir = None;
+        child.status_path = Some(status);
+        Ok(child)
+    }
     fn save_manifest(&self) -> Result<()> {
         atomic_json(
             &self.dir.join("manifest.json"),
