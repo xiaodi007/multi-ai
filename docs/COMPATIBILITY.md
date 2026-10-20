@@ -59,7 +59,7 @@ CLI 通路仍使用厂商程序、登录和工具能力。仅缺少某个 CLI �
 
 反馈以 run ID、attempt ID 和报告 SHA-256 绑定；正文变化则拒绝录入。数量为采纳、误报、重复、待定，未掌握字段留空；筛选与返工时间可选。原记录追加保存，不建立逐发现数据库。
 
-默认来源为主 AI 判断，需要具体证据。人工来源还要求明确用户意见及 `--human-confirmed`；此标志是代录声明，不是工具自动验证人类身份。模型的核验结论、自动测试成功和运行成功都不等于用户采纳。首版不自动归因收益、汇总跨报告得分或重新排序通路。
+默认来源为主 AI 判断，需要具体证据。人工来源还要求明确用户意见及 `--human-confirmed`；此标志是代录声明，不是工具自动验证人类身份。模型的核验结论、自动测试成功和运行成功都不等于用户采纳。不自动归因收益。2026-10-18 新增的 scorecard 按报告反馈汇总，recommend 给显式建议，只有 batch route:auto 应用建议；旧命令默认排序不变。
 # v0.2 增量兼容
 
 新增 `pack` 和 `delegate`；旧 run/review/text、旧别名及秒/毫秒语义保留。delegate的timeout为秒，初始300秒涵盖重试和备援。新命令只使用明确授权快照与target/fallback名单；受限CLI能力与旧agentic标志独立，未知版本不启用调查。routes/doctor新增delegation能力字段，不发送模型请求。
@@ -70,4 +70,27 @@ CLI 通路仍使用厂商程序、登录和工具能力。仅缺少某个 CLI �
 
 # 2026-10-18 增量
 
-新增 batch、stats 和 delegate implement codex-cli；run 可显式 --fallback，quota 与 rate_limit 分开，run/review/verify/batch 共享限流重试。原 run/review/verify 秒单位、text/llm-run 毫秒单位不变。batch恢复仍要求完整身份和正文哈希；实施有副作用，不提供resume，不自动提交。实施使用 Codex 原生 workspace-write 加事后 Git/mtime 核对，不套外层系统 sandbox，也不覆盖网络配置；越界变化记为 boundary_violation，只报告不回滚，监测范围与盲区见 [README](../README.md#受控实施)。旧技能模板已移除，技能安装与升级只面向 multi-ai，历史rollback仍可使用。
+新增 batch、stats 和 delegate implement codex-cli；run 可显式 --fallback，quota 与 rate_limit 分开，run/review/verify/batch 共享限流重试。原 run/review/verify 秒单位、text/llm-run 毫秒单位不变。batch恢复仍要求完整身份和正文哈希；实施有副作用，不提供resume，不自动提交。实施使用 Codex 原生 workspace-write 加事后 Git/mtime 核对，不套外层系统 sandbox，默认不覆盖网络配置；显式 --network 追加 sandbox_workspace_write.network_access=true，允许任意网络地址（包括远端），status 记录 network 布尔值；归因越界或 Claude 配置变化记为 boundary_violation，其余外部快照变化仅警告，只报告不回滚，监测范围与盲区见 [README](../README.md#受控实施)。旧技能模板已移除，技能安装与升级只面向 multi-ai，历史rollback仍可使用。
+
+
+## 打分、选路与宿主反馈增量（2026-10-18）
+
+run/review/batch/delegate 新增 task-type，历史缺失保持 null。金丝雀核对使用完整报告，source=canary 与 agent/human 精度反馈分开；不将模型自评或缓存命中视为新样本。TSV 导入预检所有报告身份和正文哈希，更正追加保存、按字段取最后已知值。batch stdout JSON 保留，ID 汇总表打印到 stderr；routes 提前关闭管道正常退出。
+
+scorecard 的时间单位为秒、screen-min 为分钟，比率为 0～1；旧 text/llm-run 毫秒参数不变。recommend 只使用当前模型/CLI身份的充分样本，冷却和本地缺失通路排除；auto 只影响显式选择它的 batch 项。失败保留完整报告的规则继续适用；实施本身成功但检测到归因越界或 Claude 配置变化时，可发布顶部带警告的诊断摘要，仍为 complete=false、非零退出且不作成功缓存；完整诊断摘要同样登记为可反馈报告。边界快照不扫描构建树、Claude 会话及时间重叠的其他受管工作树；排除清单可审计，范围外变化仍无法证明没有发生。
+
+CLI 身份检查在 cwd 位于 HOME 内时，祖先配置发现到 HOME 为止；隔离 HOME 的确定性夹具不继承其外侧的宿主配置。显式配置路径仍参与身份指纹。
+
+成绩口径、低样本门槛和外包判据见 [README](../README.md#怎么选模型怎么给分)。
+
+## 实施归因、反馈和重算增量（2026-10-21）
+
+成功状态继续为 `ok`、`complete=true`、退出 0，未增加 complete_with_warnings，旧读者可继续按原成功值判断。新增 attribution、boundary_warnings、boundary_buckets、boundary_violation_count、attributed_boundary_count、boundary_details、summary_kind。每桶只保留计数和最多 20 条路径，完整清单在 artifacts。summary_published 与 summary_kind 分别表示本轮有无发布、正式/诊断；诊断完整正文可绑定哈希录反馈，仍不作为成功恢复缓存。
+
+本机离线检查：codex-cli **0.163.0** 的 `exec --help` 确认 `--json` 输出 JSONL；安装二进制内的 exec 序列化字面量确认 `thread.started`、`turn.started`、`turn.completed`、`item.completed`、`file_change`、`changes`、`path`、`add/delete/update`。解析支持 `item.completed` 的 `item.type=file_change`、`item.changes[].path`（绝对或相对 cwd）、`kind`、`item.status`。thread.started 与 turn.completed 完整且无损坏行时 attribution=available；部分流仍保留已经观测到的越界编辑证据，并标 unavailable。已用假 Codex 合成流验证，**本轮遵守“不运行其他实施器”，未启动真实 exec 会话，真实事件形状尚需宿主安装后验证**。真实流未必带 model；此时使用共用配置解析器，取不到保持 unknown。
+
+边界默认范围为 git worktree list 的注册工作树、共享元数据和指定配置路径，可重复 --watch。git_ignored 使用所属仓 git check-ignore（批量 NUL 路径），git_internal 除 config/hooks，nested_worktree 包括嵌入的 .claude/worktrees；只有归因越界与 claude_config（含旧 .agents 保护）拒绝通过。配置根为符号链接时也扫描解析后的根；内部链接只看链接本身。快照 entries/elapsed_ms 记录规模和耗时，stderr 统一收尾行见 README。缺流时仅快照警告不能当作成功归因证明。
+
+实施字段：--outcome merged|merged-after-rework|discarded、--rework-items N、--rework-rounds N、--defect-tags tag1,tag2；TSV 可选列为 outcome/rework_items/rework_rounds/defect_tags/screen_min/rework_min。旧反馈字段和追加更正规则不变；未知数留空，source=agent，human 仍需用户明确决定。实施成绩单不给 precision，以实际 outcome 和返工数据选路，归因和警告均不进入执行失败率；底层同时失败时仍按执行原因计入。旧缺字段记录照常可读；不同历史 model 单列，未知模型不按当前配置填充。旧记录离线重判脚本、严格判据和恢复限制见 [README](../README.md#实施反馈与旧记录重判2026-10-21)，发布包附 reclassify-implement.py。
+
+CLI 配置身份发现受工作树根和 HOME 约束；cwd 不在 HOME 下时只发现 cwd 项目配置和显式用户配置，避免隔离 HOME 的夹具继承其外侧宿主配置。多个配置模型冲突时保守 unknown，routes 展示与执行使用同一解析器。

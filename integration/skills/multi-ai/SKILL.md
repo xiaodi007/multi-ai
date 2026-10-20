@@ -11,6 +11,18 @@ Before choosing a route, run `scripts/run.sh routes --json` and `scripts/run.sh 
 
 For authorized delegation, read [references/delegation.md](references/delegation.md). Before dispatching a batch, read [references/route-traits.md](references/route-traits.md) for measured speed, quota and size limits per route. Let the worker read large materials before you do: define a small goal and explicit files/directories, then read its short handoff and verify the evidence that affects your decision. For snapshot investigation, extraction and challenge, use at most two parallel independent tasks. For native batch, set each quota pool's concurrency explicitly. Keep simple searches, edits and tests on the host; do not start a roundtable for every step. This workflow uses synchronous CLI calls, not a native host sub-agent panel.
 
+## 怎么选模型、怎么给分
+
+每次派活前读 [route-traits](references/route-traits.md)，运行 `scripts/run.sh scorecard --task-type X --json`，再用 `scripts/run.sh recommend --task-type X --jobs N --cwd WORKTREE --only AUTHORIZED_ROUTES…` 看分配建议。先服从用户已授权的材料与通路范围，再选模型。`run/review/batch/delegate --task-type X` 使用自由字符串（建议 triage/review/investigate/extract/implement/walkthrough），batch 可逐项写 task_type；类型应描述实际任务。
+
+宿主事先确认的事实才可用作金丝雀：run 的 `--canary-file` 读 JSON 数组，batch 每项写 `canaries: [{"match":"src/a.rs:42","expect":"真问题"}]`；其他 match 为正则，有歧义可加 `regex:` 前缀。答案不传给模型。要求报告按 `位置 | 判定 | 证据` 输出；核对路径后缀、行号±3，同表格行/发现段落内判定（明确判定标题可承接后续证据列表），否定/待定不算命中。自动 source=canary 只测召回，测不了精度。不要把模型自己的结论做真值；召回低时先复查提示判据是否漏了缺陷类别。状态的 canary_results 可供抽查。
+
+每次模型交付后尽量独立核验、录分，未知数量和时间留空。用 `feedback --run RUN --report ATTEMPT --accepted N --false-positive N --screen-min MIN --evidence '实际核验证据'`；批量用 `feedback --batch OUTDIR --from verdicts.tsv`，TSV 列 `id accepted false_positive uncertain evidence`（Tab分隔，可再加 screen_min/rework_min）。batch 结束在 stderr 打印含 run_id/attempt_id/canary 的表，stdout JSON 保持兼容。更正按字段取最后已知值，缓存不重复计样本；默认 source=agent，human 仍需要用户明确决定。
+
+发现类成绩单按通路×任务类型给精度、金丝雀召回/漏报、中位/P90秒、quota/rate_limit/timeout失败率、每条采纳的外部秒数与宿主核验分钟，并列有效样本覆盖。少于5次调用不下结论；主力还要求5份成对精度核验、5份金丝雀报告。recommend 以精度×召回选主力，约20%探索证据不足的通路；冷却或本地缺依赖/凭据的通路排除，CLI/模型身份变化后重新积累。小批次按历史补探索欠额。普通 run/review 不变，batch 只有显式 `route:"auto"` 才用建议；对 auto 加 `--only/--exclude` 限制到本次授权路线。API 仍需 text_ready 材料声明。
+
+外包划算的判据：`宿主核验成本＋漏报率×返工成本 < 宿主自己做的成本`。工具只给核验分钟、漏报率和外部耗时的实测，返工成本和自己做的成本由宿主估计；不把速度、模型一致或运行成功当正确性/token节省。
+
 Choose the smallest useful operation:
 
 | Request | Command |
@@ -36,26 +48,26 @@ Choose an output owned by this task; overlapping outputs fail before sending. Se
 
 ## 实施
 
-When the user authorizes Codex to implement code, use this skill's runner and the controlled entry:
+实施委派使用本技能 runner 和 multi-ai，须在用户已授权的通路与材料范围内；不要另写厂商执行命令。评审席位规则继续适用。固定使用 `codex exec --json` 与原生 workspace-write，不提供 danger-full-access，不套外层 macOS sandbox；默认不覆盖网络配置。
+
+使用 `scripts/run.sh delegate implement codex-cli --cwd WORKTREE --prompt-file BRIEF --out SUMMARY`；默认 task-type=implement。cwd 必须为 Git 工作树顶层，默认拒绝 dirty，已有修改显式 --allow-dirty；out 放在 cwd 外。--path-prepend DIR 仅影响子进程 PATH，--timeout 秒；--network 允许任意网络地址，远端写入不能事后核对。不自动提交，不支持实施 resume。
+
+JSONL 文件编辑事件用于归因；cwd 外编辑或 Claude skills/settings/CLAUDE.md（含 .agents）变化为 boundary_violation，不回滚。注册工作树的 ignored 产物、Git index/logs/refs、同伴修改等未归因差异只进入 boundary_warnings，完整成功仍 status=ok/complete=true。attribution=unavailable 表示事件流无法完整解析；不能据快照断言是谁改的。--watch PATH 可追加范围。status 每桶最多 20 样例，完整列表在 boundary_details；summary_kind=final/diagnostic 区分摘要。完整诊断摘要也可按 run/attempt 反馈，实际执行失败则不登记空或 partial 报告。
+
+宿主复核后录：
 
 ```sh
-scripts/run.sh delegate implement codex-cli \
-  --cwd /absolute/path/to/clean-worktree \
-  --prompt-file /absolute/path/to/brief.md \
-  --out /absolute/path/outside-worktree/summary.md \
-  --timeout 1800 \
-  --path-prepend ~/.nvm/versions/node/v24.19.0/bin
+scripts/run.sh feedback --run RUN --report ATTEMPT \
+  --outcome merged-after-rework --rework-items 2 --rework-rounds 1 \
+  --defect-tags criterion-duplicated,id-collision --screen-min 8 --rework-min 15 \
+  --evidence '实际复核与门禁证据'
 ```
 
-Use a Git worktree root and place the summary outside it. The default refuses any uncommitted changes; only add `--allow-dirty` when intentionally continuing on those changes. Repeated `--path-prepend DIR` affects the child PATH only. Timeout is in seconds. This entry fixes `codex exec -C <cwd> -s workspace-write --skip-git-repo-check -o <staged-summary>`, without an outer macOS sandbox or an extra network configuration override. The write boundary relies on Codex's native `workspace-write` and checks after execution.
+outcome 是 merged/merged-after-rework/discarded；返工条数和另派轮数未知留空。建议缺陷标签：criterion-duplicated、id-collision、comment-format-churn、pagination-clears-data、sort-tiebreak、performance、browser-only，自由字符串可扩展。TSV 首5列保持 id/accepted/false_positive/uncertain/evidence，实施时发现数量可留空，追加 outcome/rework_items/rework_rounds/defect_tags/screen_min/rework_min。更正逐字段追加，标签整体替换，默认 source=agent。
 
-The runner records before/after HEAD, `git status --porcelain`, Git-visible file changes with preexisting edits identified, and recursive mtime snapshots of sibling Git worktrees outside cwd, `~/.claude`, and `~/.agents` (excluding this attempt’s managed artifacts; nested symlink targets are not followed). Detected changes outside the boundary produce `boundary_violation` with paths in the status; report them without rolling back. These snapshots cannot detect remote writes over the network, writes outside monitored paths, or writes that disappear or restore mtime between snapshots. Concurrent processes can also change monitored paths, so a difference alone cannot prove Codex caused it.
+实施成绩看合入率、返工后合入率、弃用率、平均返工条数和轮数、缺陷分布、中位/P90 秒；不给 precision。警告与归因越界单列，失败率只计执行失败。recommend 按合入率优先、较少返工次序，至少5份 outcome 和5份返工条数才比较；未知模型不获主力结论。旧误报补录前，可由宿主在停止写入后用发布包 reclassify-implement.py --state-dir STATE --status SUMMARY.md.status.json 预演，加 --apply 重判并登记；完整性判据、备份与中断恢复见仓库 README，不能把失败或损坏摘要改成成功。
 
-This entry does not commit or reuse implementation results. After a failed or timed out implementation, inspect the actual worktree as well as the status, since edits may already exist; the previous complete summary is preserved.
-
-Use this entry for implementation delegation. Keep review-seat selection rules above; an implementation task is a separately authorized operation. All external model work goes through `multi-ai`; old `ai-review`/`multi-llm-pipeline` skills are no longer installed or updated, and `ai-review`/`llm-run` binary aliases are deprecated. Do not write a separate vendor execution command.
-
-For a batch, use an explicit `route` and `fallback` list per job in the JSON manifest. Limit concurrency by quota pool with `--pool-limit POOL=N`. Quota errors switch pool; rate limits retry with backoff. Read each `.md.status.json` and the batch `dispatch.json`; a prior complete report can remain after this run fails. Use `stats --json` to refresh local observations without making a model request; unknown historical fields remain null. Existing measurement guidance in route-traits is dated evidence, not a new benchmark.
+For a batch, use an explicit `route` and `fallback` list per job, or authorized `route:"auto"` with task_type in the JSON manifest. Limit concurrency by quota pool with `--pool-limit POOL=N`. Quota errors switch pool; rate limits retry with backoff. Read each `.md.status.json` and the batch `dispatch.json`; a prior complete report can remain after this run fails. Use `stats --json` to refresh local observations without making a model request; unknown historical fields remain null. Existing measurement guidance in route-traits is dated evidence, not a new benchmark.
 
 Read and independently verify returned findings against the material, requirements, or actual tests. Model agreement and `CONFIRMED` are evidence to check, not acceptance. After actual verification, record known report-level counts:
 
@@ -64,4 +76,4 @@ scripts/run.sh feedback --run RUN-UUID --report ATTEMPT-ID \
   --accepted 1 --evidence 'Verified against the supplied requirement and test …'
 ```
 
-Leave unknown counts and time savings unset. Feedback binds the report hash and appends events; corrections retain the earlier record. Default source is `agent`. Use `--source human --human-confirmed` only for an explicit user decision, with that decision in the evidence. Passing tests do not imply human acceptance. Feedback does not change route ranking.
+Leave unknown counts and time savings unset. Feedback binds the report hash and appends events; corrections retain the earlier record. Default source is `agent`. Use `--source human --human-confirmed` only for an explicit user decision, with that decision in the evidence. Passing tests do not imply human acceptance. Feedback informs scorecard and recommend; ordinary run/review ranking stays unchanged.

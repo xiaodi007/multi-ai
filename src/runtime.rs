@@ -31,6 +31,18 @@ pub fn state_dir() -> PathBuf {
 pub fn sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
+/// A consumer closing a listing pipe early is a normal command termination.
+pub fn stdout_line(args: std::fmt::Arguments<'_>) -> Result<()> {
+    let result = (|| -> std::io::Result<()> {
+        let mut out = std::io::stdout().lock();
+        out.write_fmt(args)?;
+        out.write_all(b"\n")
+    })();
+    match result {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other.map_err(Into::into),
+    }
+}
 pub fn private_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
@@ -147,6 +159,8 @@ impl OutputLock {
 
 #[derive(Clone)]
 pub struct OutputContext {
+    pub task_type: Option<String>,
+    pub canaries: Vec<crate::canary::Canary>,
     pub run_id: String,
     pub dir: PathBuf,
     pub output: Option<PathBuf>,
@@ -161,6 +175,7 @@ pub struct OutputContext {
 }
 impl OutputContext {
     pub fn new(args: &Args, command: &str, dispatch: bool) -> Result<Self> {
+        let canaries = crate::canary::load(args)?;
         let output = args
             .get("out")
             .map(PathBuf::from)
@@ -263,9 +278,11 @@ impl OutputContext {
             excludes.push(p.clone());
         }
         let manifest = json!({"schemaVersion":1,"engine":"multi-ai-rust","engineVersion":env!("CARGO_PKG_VERSION"),
-            "run_id":run_id,"command":command,"status":"running","started_at":Utc::now().to_rfc3339(),
+            "run_id":run_id,"command":command,"task_type":args.get("task-type"),"status":"running","started_at":Utc::now().to_rfc3339(),
             "reports":[],"outputs":{"out":output,"outdir":outdir,"progress":progress_dir},"excludes":excludes});
         let ctx = Self {
+            task_type: args.get("task-type").map(str::to_owned),
+            canaries,
             run_id,
             dir,
             output,
@@ -411,7 +428,7 @@ impl OutputContext {
             run_id: self.run_id.clone(),
             started: Instant::now(),
             metadata: Arc::new(Mutex::new(
-                json!({"status":"running","run_id":self.run_id,"label":label}),
+                json!({"status":"running","run_id":self.run_id,"label":label,"task_type":self.task_type,"started_at":Utc::now().to_rfc3339()}),
             )),
         };
         attempt.event("started", json!({}))?;
@@ -428,6 +445,9 @@ impl OutputContext {
             json!({"reportSha256":sha256(content.as_bytes())}),
         )?;
         let cached = result["cached"].as_bool().unwrap_or(false);
+        let mut result = result.clone();
+        self.annotate(&mut result, content);
+        attempt.update(json!({"task_type":self.task_type,"canary_hits":result["canary_hits"],"canary_total":result["canary_total"]}))?;
         let row = json!({"attempt_id":attempt.id,"run_id":self.run_id,"path":attempt.dir.join("report.md"),
             "report_sha256":sha256(content.as_bytes()),"result":result,"cached":cached,
             "model_calls":if cached {0}else{1}});
@@ -440,7 +460,35 @@ impl OutputContext {
                 reports.push(row);
             }
         }
-        self.save_manifest()
+        self.save_manifest()?;
+        if !self.canaries.is_empty() {
+            append_feedback(
+                &self.dir,
+                &json!({
+                    "event_id":Uuid::new_v4().to_string(),"run_id":self.run_id,"attempt_id":attempt.id,
+                    "report_sha256":sha256(content.as_bytes()),"source":"canary","recorded_by":"multi-ai",
+                    "counts":{"accepted":null,"false-positive":null,"duplicate":null,"uncertain":null},
+                    "timing":{"screen-min":null,"rework-min":null},
+                    "canary_hits":result["canary_hits"],"canary_total":result["canary_total"],
+                    "evidence":result["canary_results"],"created_at":Utc::now().to_rfc3339()
+                }),
+            )?;
+        }
+        Ok(())
+    }
+    pub fn annotate(&self, result: &mut Value, content: &str) {
+        result["task_type"] = json!(self.task_type);
+        if let Some(fields) = result.as_object_mut() {
+            for key in ["canary_hits", "canary_total", "canary_results"] {
+                fields.remove(key);
+            }
+        }
+        if !self.canaries.is_empty() {
+            let fields = crate::canary::evaluate(&self.canaries, content);
+            for (key, value) in fields.as_object().unwrap() {
+                result[key] = value.clone();
+            }
+        }
     }
     pub fn publish(&self, content: &str) -> Result<()> {
         if let Some(path) = &self.output {
@@ -466,6 +514,9 @@ impl OutputContext {
         atomic_text(&path, content)
     }
     pub fn save_status(&self, mut value: Value) -> Result<()> {
+        if value["task_type"].is_null() {
+            value["task_type"] = json!(self.task_type);
+        }
         value["run_id"] = json!(self.run_id);
         value["manifest"] = json!(self.dir.join("manifest.json"));
         if let Some(path) = &self.status_path {
@@ -731,7 +782,7 @@ pub async fn passthrough(command: &str, tokens: &[String]) -> Result<i32> {
     Ok(130)
 }
 
-pub fn feedback_command(args: &Args) -> Result<i32> {
+fn prepare_feedback(args: &Args) -> Result<(PathBuf, Value)> {
     let run = args.get("run").context("feedback requires --run UUID")?;
     if Uuid::parse_str(run).is_err() {
         bail!("invalid run ID");
@@ -777,6 +828,29 @@ pub fn feedback_command(args: &Args) -> Result<i32> {
             None => Value::Null,
         };
     }
+    let mut implementation = json!({});
+    if let Some(outcome) = args.get("outcome") {
+        if !["merged", "merged-after-rework", "discarded"].contains(&outcome) {
+            bail!("invalid --outcome");
+        }
+        implementation["outcome"] = json!(outcome);
+        has_count = true;
+    }
+    for field in ["rework-items", "rework-rounds"] {
+        if let Some(value) = args.get(field) {
+            implementation[field] = json!(value.parse::<u64>()?);
+            has_count = true;
+        }
+    }
+    if let Some(tags) = args.get("defect-tags") {
+        implementation["defect-tags"] = json!(
+            tags.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        has_count = true;
+    }
     if !has_count {
         bail!("feedback requires at least one report-level count");
     }
@@ -795,17 +869,139 @@ pub fn feedback_command(args: &Args) -> Result<i32> {
     }
     let event = json!({"event_id":Uuid::new_v4().to_string(),"run_id":run,"attempt_id":report,
         "report_sha256":row["report_sha256"],"source":source,"recorded_by":"host",
-        "counts":counts,"timing":timing,"evidence":evidence,"created_at":Utc::now().to_rfc3339()});
-    let file = manifest_path.parent().unwrap().join("feedback.jsonl");
+        "counts":counts,"implementation":implementation,"timing":timing,"evidence":evidence,"created_at":Utc::now().to_rfc3339()});
+    Ok((manifest_path.parent().unwrap().to_path_buf(), event))
+}
+fn append_feedback(directory: &Path, event: &Value) -> Result<()> {
+    let file = directory.join("feedback.jsonl");
     let _lock = OutputLock::acquire(&[(file.clone(), true)])?;
     let mut out = OpenOptions::new()
         .append(true)
         .create(true)
         .mode(0o600)
         .open(&file)?;
-    out.write_all(format!("{}\n", serde_json::to_string(&event)?).as_bytes())?;
+    out.write_all(format!("{}\n", serde_json::to_string(event)?).as_bytes())?;
     out.sync_all()?;
-    println!("{}", serde_json::to_string_pretty(&event)?);
+    Ok(())
+}
+pub fn feedback_command(args: &Args) -> Result<i32> {
+    if args.has("batch") || args.has("from") {
+        return batch_feedback(args);
+    }
+    let (directory, event) = prepare_feedback(args)?;
+    append_feedback(&directory, &event)?;
+    stdout_line(format_args!("{}", serde_json::to_string_pretty(&event)?))?;
+    Ok(0)
+}
+fn batch_feedback(args: &Args) -> Result<i32> {
+    for key in [
+        "run",
+        "report",
+        "accepted",
+        "false-positive",
+        "duplicate",
+        "uncertain",
+        "evidence",
+        "outcome",
+        "rework-items",
+        "rework-rounds",
+        "defect-tags",
+        "screen-min",
+        "rework-min",
+    ] {
+        if args.has(key) {
+            bail!("--batch/--from cannot be combined with --{key}");
+        }
+    }
+    let directory = Path::new(
+        args.get("batch")
+            .context("feedback requires --batch OUTDIR")?,
+    );
+    let text = fs::read_to_string(args.get("from").context("feedback requires --from TSV")?)?;
+    let mut lines = text.lines();
+    let header: Vec<_> = lines
+        .next()
+        .context("empty verdict TSV")?
+        .split('\t')
+        .collect();
+    if header.len() < 5
+        || header[..5] != ["id", "accepted", "false_positive", "uncertain", "evidence"]
+        || header[5..].iter().any(|v| {
+            ![
+                "screen_min",
+                "rework_min",
+                "outcome",
+                "rework_items",
+                "rework_rounds",
+                "defect_tags",
+            ]
+            .contains(v)
+        })
+        || header
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != header.len()
+    {
+        bail!(
+            "TSV header must be id accepted false_positive uncertain evidence (tab-separated); optional screen_min/rework_min/outcome/rework_items/rework_rounds/defect_tags"
+        );
+    }
+    let mut prepared = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (index, line) in lines.enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != header.len() || !safe_id(fields[0]) || !seen.insert(fields[0].to_owned())
+        {
+            bail!("invalid or duplicate TSV row {}", index + 2);
+        }
+        let id = fields[0];
+        let status: Value =
+            serde_json::from_slice(&fs::read(directory.join(format!("{id}.md.status.json")))?)?;
+        if (status["status"] != "ok" || status["complete"] != true)
+            && !(status["status"] == "boundary_violation"
+                && status["summary_published"] == true
+                && status["execution_status"] == "ok")
+        {
+            bail!("batch job {id} has no current complete report");
+        }
+        let mut row_args = args.clone();
+        row_args.set("run", status["run_id"].as_str().context("missing run_id")?);
+        row_args.set(
+            "report",
+            status["attempt_id"]
+                .as_str()
+                .context("missing attempt_id")?,
+        );
+        for (key, value) in header.iter().zip(&fields).skip(1) {
+            if !value.is_empty() {
+                row_args.set(&key.replace('_', "-"), value);
+            }
+        }
+        let (run_dir, mut event) =
+            prepare_feedback(&row_args).with_context(|| format!("TSV row {} ({id})", index + 2))?;
+        if sha256(&fs::read(directory.join(format!("{id}.md")))?) != event["report_sha256"] {
+            bail!("batch job {id} published report hash mismatch");
+        }
+        event["batch_id"] = json!(id);
+        prepared.push((run_dir, event));
+    }
+    if prepared.is_empty() {
+        bail!("TSV has no verdict rows");
+    }
+    // No append until every row, count and bound report has passed validation.
+    for (run_dir, event) in &prepared {
+        append_feedback(run_dir, event)?;
+    }
+    stdout_line(format_args!(
+        "{}",
+        serde_json::to_string_pretty(
+            &json!({"written":prepared.len(),"events":prepared.iter().map(|(_,v)|v).collect::<Vec<_>>()})
+        )?
+    ))?;
     Ok(0)
 }
 

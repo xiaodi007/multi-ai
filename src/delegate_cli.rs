@@ -108,7 +108,7 @@ fn version(path: &Path) -> Result<String> {
             drop(group);
             let result = child.wait_with_output()?;
             if !result.status.success() {
-                bail!("CLI version command failed");
+                bail!("CLI version command failed: {}", result.status);
             }
             if result.stdout.len() > 4096 {
                 bail!("CLI version output exceeded its limit");
@@ -272,8 +272,8 @@ pub fn capability(config: &Config, route: &Route) -> Value {
     };
     let actual = match version(&path) {
         Ok(v) => v,
-        Err(_) => {
-            return json!({"supported":true,"available":false,"validated_version":expected,"reason":"cannot determine vendor CLI version"});
+        Err(error) => {
+            return json!({"supported":true,"available":false,"validated_version":expected,"reason":format!("cannot determine vendor CLI version: {error}")});
         }
     };
     let matched = actual == expected;

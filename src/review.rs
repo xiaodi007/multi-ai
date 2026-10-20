@@ -596,12 +596,25 @@ fn program_fingerprints(
     }
     Ok(())
 }
-fn cli_identity(r: &Route, config: &Config, args: &Args) -> Result<(Value, bool)> {
+pub(crate) fn cli_identity(r: &Route, config: &Config, args: &Args) -> Result<(Value, bool)> {
+    // An intentionally empty/isolated Config must never inherit the host's HOME or CLI.
+    if !config.environment().contains_key("HOME") {
+        return Ok((
+            json!({"homeUnavailable":true,"model":r.explicit_model(),"model_source":if r.explicit_model().is_some(){"route"}else{"cli-default-unknown"}}),
+            false,
+        ));
+    }
     let Some(first) = r.argv.first() else {
-        return Ok((json!({"missingExecutable":true}), false));
+        return Ok((
+            json!({"missingExecutable":true,"model":r.explicit_model(),"model_source":if r.explicit_model().is_some(){"route"}else{"cli-default-unknown"}}),
+            false,
+        ));
     };
     let Some(executable) = resolve_executable(first, Some(config)) else {
-        return Ok((json!({"missingExecutable":true}), false));
+        return Ok((
+            json!({"missingExecutable":true,"model":r.explicit_model(),"model_source":if r.explicit_model().is_some(){"route"}else{"cli-default-unknown"}}),
+            false,
+        ));
     };
     let mut files = BTreeMap::new();
     program_fingerprints(&executable, config, &mut files)?;
@@ -667,9 +680,18 @@ fn cli_identity(r: &Route, config: &Config, args: &Args) -> Result<(Value, bool)
         _ => None,
     };
     if let Some(folder) = known_vendor {
+        let home_boundary = fs::canonicalize(&home).unwrap_or_else(|_| home.clone());
         for ancestor in cwd.ancestors() {
             for file in ["config.toml", "settings.json", "settings.local.json"] {
                 candidates.push(ancestor.join(folder).join(file));
+            }
+            // A private HOME also bounds project discovery when cwd lives below it.
+            // Do not let isolated fixtures/sessions inherit a different user's parent config.
+            if ancestor == home_boundary
+                || !cwd.starts_with(&home_boundary)
+                || ancestor.join(".git").exists()
+            {
+                break;
             }
         }
     }
@@ -690,7 +712,9 @@ fn cli_identity(r: &Route, config: &Config, args: &Args) -> Result<(Value, bool)
             candidates.push(PathBuf::from(value));
         }
     }
-    let explicit_model = r.explicit_model().is_some();
+    let mut resolved_model = r.explicit_model();
+    let explicit_model = resolved_model.is_some();
+    let mut config_models = std::collections::BTreeSet::new();
     let default_key = if ["kimi", "kimi-k3"].contains(&r.legacy_id.as_str()) {
         "default_model"
     } else {
@@ -707,12 +731,32 @@ fn cli_identity(r: &Route, config: &Config, args: &Args) -> Result<(Value, bool)
                 .take_while(|line| !line.trim_start().starts_with('['))
                 .collect::<Vec<_>>()
                 .join("\n");
+            if !explicit_model {
+                if let Some(m) = model_pattern.find(&top).and_then(|m| {
+                    m.as_str()
+                        .split_once('=')
+                        .map(|(_, v)| v.trim().trim_matches(['\"', '\'']).to_owned())
+                }) {
+                    config_models.insert(m);
+                }
+                if let Ok(v) = serde_json::from_slice::<Value>(&bytes)
+                    && let Some(m) = v[default_key].as_str().filter(|s| !s.is_empty())
+                {
+                    config_models.insert(m.to_owned());
+                }
+            }
             known_model |= model_pattern.is_match(&top)
                 || serde_json::from_slice::<Value>(&bytes)
                     .ok()
                     .is_some_and(|v| v[default_key].as_str().is_some_and(|s| !s.is_empty()));
         }
         add_fingerprint(&path, &mut files)?;
+    }
+    if !explicit_model && config_models.len() == 1 {
+        resolved_model = config_models.into_iter().next();
+    }
+    if r.legacy_id == "codex" {
+        known_model = resolved_model.is_some();
     }
     let overrides: BTreeMap<&str, &str> = env
         .iter()
@@ -726,7 +770,7 @@ fn cli_identity(r: &Route, config: &Config, args: &Args) -> Result<(Value, bool)
         .collect();
     // Only hashes enter durable metadata. Config files and environment values may contain keys.
     Ok((
-        json!({"files":files,"overridesSha256":sha(&serde_json::to_vec(&overrides)?),"modelIdentityKnown":known_model}),
+        json!({"files":files,"overridesSha256":sha(&serde_json::to_vec(&overrides)?),"modelIdentityKnown":known_model,"model":resolved_model,"model_source":if explicit_model {"route"} else if resolved_model.is_some() {"cli-config"} else {"cli-default-unknown"}}),
         known_model,
     ))
 }
@@ -1096,6 +1140,8 @@ pub(crate) async fn run_one(
     let start = Instant::now();
     let attempt = ctx.attempt(&r.id)?;
     let mut result = json!({"provider":name(r,legacy),"route":r.id,"pool":r.pool,"family":r.family,"label":r.label,"status":"error","output":"","error":"","seconds":0.0,"artifacts":attempt.dir,"run_id":ctx.run_id,"attempt_id":attempt.id,"complete":false});
+    result["task_type"] = json!(ctx.task_type);
+    result["auto_primary"] = json!(args.get("auto-primary"));
     if r.api_alias.is_none() {
         result["inputBytes"] = json!(prompt.len());
     }
@@ -1142,6 +1188,8 @@ pub(crate) async fn run_one(
     } else {
         cli_identity(r, config, args)?
     };
+    result["route_revision"] = json!(crate::scorecard::revision(r, &resolved));
+    result["model_identity_known"] = json!(model_identity_known);
     let cwd = PathBuf::from(args.get("cwd").unwrap_or("."));
     let mut cache = cache_path(ctx, r);
     let cache_disabled_reason = if !model_identity_known && cache.is_some() {
@@ -1174,7 +1222,7 @@ pub(crate) async fn run_one(
     } else {
         None
     };
-    let identity = json!({"version":env!("CARGO_PKG_VERSION"),"engineSha256":engine_sha()?,"implementation":"rust-native-v1","provider":r.id,"routeConfigSha256":sha(&serde_json::to_vec(r)?),"configSha256":sha(&serde_json::to_vec(&json!({"routes":config.routes,"profiles":config.profiles}))?),"promptSha256":sha(prompt.as_bytes()),"cwd":fs::canonicalize(&cwd).unwrap_or(cwd),"sourceId":args.get("source-id"),"workspace":workspace,"timeout":numeric(args,"policy-timeout",total)?,"idleTimeout":idle,"headersTimeout":args.get("headers-timeout"),"maxTokens":args.get("max-tokens"),"resolved":resolved});
+    let identity = json!({"version":env!("CARGO_PKG_VERSION"),"engineSha256":engine_sha()?,"implementation":"rust-native-v1","taskType":ctx.task_type,"provider":r.id,"routeConfigSha256":sha(&serde_json::to_vec(r)?),"configSha256":sha(&serde_json::to_vec(&json!({"routes":config.routes,"profiles":config.profiles}))?),"promptSha256":sha(prompt.as_bytes()),"cwd":fs::canonicalize(&cwd).unwrap_or(cwd),"sourceId":args.get("source-id"),"workspace":workspace,"timeout":numeric(args,"policy-timeout",total)?,"idleTimeout":idle,"headersTimeout":args.get("headers-timeout"),"maxTokens":args.get("max-tokens"),"resolved":resolved});
     attempt.update(json!({"inputIdentity":identity,"promptSha256":sha(prompt.as_bytes()),"inputAttached":attached,"textReady":args.has("text-ready")}))?;
     if args.has("resume") && cache_disabled_reason.is_none() {
         let path = cache.as_ref().context("恢复需要 --out 或 --outdir")?;
@@ -1185,6 +1233,8 @@ pub(crate) async fn run_one(
             cached["attempt_id"] = json!(attempt.id);
             cached["artifacts"] = json!(attempt.dir);
             cached["provider"] = json!(name(r, legacy));
+            let body = s(&cached, "output").to_owned();
+            ctx.annotate(&mut cached, &body);
             attempt.finish("ok", cached.clone())?;
             ctx.report(&attempt, s(&cached, "output"), &cached)?;
             return Ok(cached);
@@ -1262,6 +1312,10 @@ pub(crate) async fn run_one(
     }
     result["outputBytes"] = json!(s(&result, "output").len());
     result["seconds"] = json!((start.elapsed().as_secs_f64() * 10.0).round() / 10.0);
+    if result["status"] == "ok" {
+        let body = s(&result, "output").to_owned();
+        ctx.annotate(&mut result, &body);
+    }
     if matches!(s(&result, "status"), "quota" | "auth" | "transport") {
         cool_down(&r.pool, s(&result, "status"), s(&result, "error"))?;
     }

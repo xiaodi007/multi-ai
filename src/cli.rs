@@ -24,6 +24,8 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
     let common = &["help", "json", "quiet"];
     let specific: &[&str] = match command {
         "batch" => &[
+            "only",
+            "exclude",
             "jobs",
             "outdir",
             "pool-limit",
@@ -32,6 +34,7 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
             "timeout",
             "resume",
             "source-id",
+            "task-type",
         ],
         "run" => &[
             "prompt-file",
@@ -50,8 +53,11 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
             "fallback",
             "rate-limit-retries",
             "retry-delay-ms",
+            "task-type",
+            "canary-file",
         ],
         "review" | "dispatch" => &[
+            "task-type",
             "rate-limit-retries",
             "retry-delay-ms",
             "prompt-file",
@@ -95,12 +101,16 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
             "no-quota",
         ],
         "probe" => &["only", "timeout"],
-        "stats" => &["state-dir"],
+        "stats" => &["state-dir", "task-type"],
+        "scorecard" => &["state-dir", "task-type", "since"],
+        "recommend" => &["task-type", "jobs", "only", "exclude", "cwd"],
         "usage" | "status" => &[],
         "reset" => &["all"],
         "routes" => &[],
         "doctor" => &["live", "only", "timeout"],
         "feedback" => &[
+            "batch",
+            "from",
             "run",
             "report",
             "source",
@@ -111,19 +121,27 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
             "uncertain",
             "screen-min",
             "rework-min",
+            "outcome",
+            "rework-items",
+            "rework-rounds",
+            "defect-tags",
             "evidence",
         ],
         "install-config" => &["from"],
         "pack" => &["root", "input", "scope", "outdir"],
         "delegate" if args.positional.first().is_some_and(|v| v == "implement") => &[
+            "task-type",
             "cwd",
             "out",
             "prompt-file",
             "timeout",
             "path-prepend",
+            "watch",
             "allow-dirty",
+            "network",
         ],
         "delegate" => &[
+            "task-type",
             "packet",
             "prompt-file",
             "outdir",
@@ -134,6 +152,9 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
         "_broker" => &["packet", "audit"],
         _ => return Ok(()),
     };
+    if command == "delegate" && args.values.contains_key("network") {
+        return Err(UsageError("--network is a flag and does not accept a value".into()).into());
+    }
     for key in args.values.keys().chain(args.flags.iter()) {
         if !common.contains(&key.as_str()) && !specific.contains(&key.as_str()) {
             return Err(UsageError(format!("Unknown argument --{key} for {command}")).into());
@@ -184,6 +205,14 @@ fn help_app() -> Command {
         ("usage", "查看已有账户额度"),
         ("status", "查看冷却，不代表已经验证健康"),
         ("stats", "离线汇总本地运行记录；--json / --state-dir DIR"),
+        (
+            "scorecard",
+            "通路 × 任务类型成绩单；--task-type X --since DATE --json",
+        ),
+        (
+            "recommend",
+            "按成绩单建议分配；--task-type X --jobs N --json",
+        ),
         ("reset", "清指定额度池冷却"),
         ("install-config", "导入配置，不覆盖已有文件、不复制凭据"),
         ("help", "离线帮助"),
@@ -214,14 +243,18 @@ fn print_help(topic: Option<&str>, legacy: Option<&str>) -> Result<()> {
     println!();
     if topic == Some("batch") {
         println!(
-            "multi-ai batch --jobs jobs.json --outdir results [--pool-limit POOL=N] [--timeout SECONDS] [--resume]\n清单为 {{\"jobs\":[{{\"id\":\"one\",\"prompt_file\":\"task.md\",\"cwd\":\"repo\",\"route\":\"grok-cli\",\"fallback\":[]}}],\"pool_limits\":{{\"xai\":2}}}}；路径相对清单，默认每池并发2。\n每项独立 .md / .md.status.json；仅复用身份与正文哈希一致的完整报告。"
+            "multi-ai batch --jobs jobs.json --outdir results [--pool-limit POOL=N] [--timeout SECONDS] [--resume]\n清单为 {{\"jobs\":[{{\"id\":\"one\",\"prompt_file\":\"task.md\",\"cwd\":\"repo\",\"route\":\"grok-cli\",\"fallback\":[]}}],\"pool_limits\":{{\"xai\":2}}}}；路径相对清单，默认每池并发2。\n每项独立 .md / .md.status.json；仅复用身份与正文哈希一致的完整报告。task_type 为自由字符串；canaries 为 [{{\"match\":\"src/a.rs:10\",\"expect\":\"真问题\"}}]；route:auto 按成绩分配，可用 --only/--exclude 收窄。"
+        );
+    } else if topic == Some("scorecard") || topic == Some("recommend") {
+        println!(
+            "multi-ai scorecard [--task-type X] [--since YYYY-MM-DD] [--state-dir DIR] [--json]\nmulti-ai recommend --task-type X [--jobs N] [--cwd DIR] [--only ROUTE…] [--exclude ROUTE…] [--json]\n按真实调用、绑定报告的宿主反馈及金丝雀汇总。至少5次调用、5份成对核验和5份金丝雀报告才可比较；否则不下结论。约20%探索；冷却/本地缺失通路排除。小批次按历史样本补探索欠额。"
         );
     } else if topic == Some("pack") || topic == Some("delegate") {
         println!(
             "材料快照：\n  multi-ai pack --root DIR --input FILE --scope DIR --outdir NEW-DIR\n委派：\n  multi-ai delegate investigate kimi-cli-default --packet DIR --prompt-file TASK --outdir DIR --fallback grok-cli\n  multi-ai delegate extract deepseek-flash --packet DIR --prompt-file TASK --outdir DIR --resume --json\n角色：investigate|extract|challenge；--timeout 默认300秒（含备援）。\n--input/--scope/--fallback 可重复；默认stdout短交接，完整报告路径随结果返回。\n调查只开放快照的list/search/read；doctor展示隔离与版本可用性。\npack输出必须是新目录，快照immutable；--resume只复用身份完整匹配结果。"
         );
         println!(
-            "实施：\n  multi-ai delegate implement codex-cli --cwd WORKTREE --prompt-file BRIEF --out SUMMARY [--timeout SECONDS] [--path-prepend DIR] [--allow-dirty]\n仅macOS；cwd须为Git工作树顶层，默认拒绝未提交修改；SUMMARY置于cwd之外。\n固定受控workspace-write，运行前后记录HEAD/status/文件变化；不提交，不支持resume。 "
+            "实施：\n  multi-ai delegate implement codex-cli --cwd WORKTREE --prompt-file BRIEF --out SUMMARY [--timeout SECONDS] [--path-prepend DIR] [--allow-dirty] [--network] [--watch PATH]\n仅macOS；cwd须为Git工作树顶层，默认拒绝未提交修改；SUMMARY置于cwd之外。\n固定受控workspace-write；--network允许命令访问任意网络地址，网络写入无法事后核对。运行前后记录HEAD/status/文件变化；不提交，不支持resume。 "
         );
     } else if legacy == Some("llm-run") || topic == Some("text") {
         println!(
@@ -229,7 +262,7 @@ fn print_help(topic: Option<&str>, legacy: Option<&str>) -> Result<()> {
         );
     } else {
         println!(
-            "示例：\n  multi-ai routes --json\n  multi-ai run kimi-k3-cli --prompt-file evidence.md --cwd /path/to/repo --out review.md\n  multi-ai review --input evidence.md --text-ready --outdir reviews --seats 2\n  multi-ai verify --findings review.md --cwd /path/to/repo --out verify.md\n  multi-ai text glm --input evidence.md --out answer.md\n\nrun/review/verify：--timeout、--headers-timeout、--idle-timeout 单位秒。\n--only ROUTE… / --exclude ROUTE…；--no-metered；--agentic；--resume。\nAPI只读实际附带的正文，不能读取cwd路径；客户原件仅在明确授权范围使用。\n反馈：multi-ai feedback --run UUID --report ATTEMPT-ID --accepted N --evidence TEXT\n  [--false-positive N --duplicate N --uncertain N --screen-min N --rework-min N]\n默认source=agent；人工决定需 --source human --human-confirmed 与明确用户证据。\n顺序复用自动保留历史；同输出并发立即失败；旧引擎缓存失配可能重新请求。\nreview --dry-run 保留额度采集行为；需要纯离线检查使用 routes 或 doctor。"
+            "示例：\n  multi-ai routes --json\n  multi-ai run kimi-k3-cli --prompt-file evidence.md --cwd /path/to/repo --out review.md\n  multi-ai review --input evidence.md --text-ready --outdir reviews --seats 2\n  multi-ai verify --findings review.md --cwd /path/to/repo --out verify.md\n  multi-ai text glm --input evidence.md --out answer.md\n\nrun/review/verify：--timeout、--headers-timeout、--idle-timeout 单位秒。\n--only ROUTE… / --exclude ROUTE…；--no-metered；--agentic；--resume。\nAPI只读实际附带的正文，不能读取cwd路径；客户原件仅在明确授权范围使用。\n反馈：multi-ai feedback --run UUID --report ATTEMPT-ID --accepted N --evidence TEXT\n  [--false-positive N --duplicate N --uncertain N --screen-min N --rework-min N]\n实施反馈：[--outcome merged|merged-after-rework|discarded --rework-items N --rework-rounds N --defect-tags tag1,tag2]\n批量反馈：multi-ai feedback --batch OUTDIR --from verdicts.tsv（id accepted false_positive uncertain evidence；Tab分隔；可选 screen_min rework_min outcome rework_items rework_rounds defect_tags）\nrun/review/batch/delegate 接受 --task-type X；run --canary-file FILE 接收本地已知答案 JSON 数组，不发送给模型。\n默认source=agent；人工决定需 --source human --human-confirmed 与明确用户证据。\n顺序复用自动保留历史；同输出并发立即失败；旧引擎缓存失配可能重新请求。\nreview --dry-run 保留额度采集行为；需要纯离线检查使用 routes 或 doctor。"
         );
     }
     Ok(())
@@ -400,6 +433,9 @@ pub async fn main_entry(argv: Vec<String>) -> Result<i32> {
     if command == "stats" {
         return crate::stats::command(&args);
     }
+    if command == "scorecard" {
+        return crate::scorecard::command(&args);
+    }
     if command == "install-config" {
         return install_config(&args);
     }
@@ -419,6 +455,7 @@ pub async fn main_entry(argv: Vec<String>) -> Result<i32> {
     }
     let config = Config::load()?;
     match command.as_str() {
+        "recommend" => crate::scorecard::recommend_command(&config, &args),
         "routes" => {
             let mut value = config.public_routes()?;
             for entry in value.as_array_mut().context("routes not array")? {
@@ -426,21 +463,21 @@ pub async fn main_entry(argv: Vec<String>) -> Result<i32> {
                 entry["capabilities"]["delegation"] = crate::delegate::capability(&config, &route);
             }
             if args.has("json") {
-                println!("{}", serde_json::to_string_pretty(&value)?);
+                runtime::stdout_line(format_args!("{}", serde_json::to_string_pretty(&value)?))?;
             } else {
-                println!(
+                runtime::stdout_line(format_args!(
                     "{:<24} {:<17} {:<13} MODEL / SOURCE",
                     "ROUTE", "POOL", "FAMILY"
-                );
+                ))?;
                 for route in value.as_array().context("route list is not an array")? {
-                    println!(
+                    runtime::stdout_line(format_args!(
                         "{:<24} {:<17} {:<13} {} / {}",
                         route["id"].as_str().unwrap_or("?"),
                         route["pool"].as_str().unwrap_or("?"),
                         route["family"].as_str().unwrap_or("?"),
                         route["model"].as_str().unwrap_or("unknown"),
                         route["model_source"].as_str().unwrap_or("CLI default")
-                    );
+                    ))?;
                 }
             }
             Ok(0)

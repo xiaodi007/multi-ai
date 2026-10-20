@@ -45,7 +45,8 @@ impl Fixture {
     }
     fn command(&self) -> Command {
         let mut c = Command::new(binary());
-        c.current_dir(&self.cwd)
+        c.env_clear()
+            .current_dir(&self.cwd)
             .env("HOME", self.temp.path())
             .env("MULTI_AI_CONFIG_DIR", &self.config)
             .env("MULTI_AI_STATE_DIR", &self.state)

@@ -30,6 +30,7 @@ impl Args {
             "agentic",
             "ignore-cooldown",
             "allow-dirty",
+            "network",
         ];
         let mut result = Self {
             raw: tokens.to_vec(),

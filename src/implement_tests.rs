@@ -352,6 +352,7 @@ fn model_parser_is_shared_with_display_and_controlled_execution() {
         &route,
         Path::new("/fixture/codex"),
         Path::new("/fixture/worktree"),
+        false,
     );
     assert_eq!(controlled.explicit_model(), route.explicit_model());
     route.argv = vec!["codex".into(), "--model".into(), "{prompt}".into()];
@@ -370,16 +371,18 @@ fn boundary_scan_records_internal_symlink_without_following_target() {
     let link = monitored.join("linked-directory");
     symlink(&target, &link).unwrap();
     let new_snapshot = || BoundarySnapshot {
+        elapsed_ms: 0,
         roots: BTreeSet::from([monitored.clone()]),
         entries: BTreeMap::new(),
         errors: Vec::new(),
         excluded_artifacts: temp.path().join("artifacts"),
+        excluded_worktrees: BTreeSet::new(),
     };
 
     let mut before = new_snapshot();
     scan_mtimes(&monitored, &cwd, &mut before);
     assert!(before.errors.is_empty());
-    assert_eq!(before.entries.len(), 2);
+    assert_eq!(before.entries.len(), 1);
     assert_eq!(before.entries[&link].kind, "symlink");
     assert!(!before.entries.contains_key(&link.join("private.txt")));
     assert!(!before.entries.contains_key(&target));
@@ -409,12 +412,15 @@ fn boundary_scan_error_does_not_turn_unknown_entries_into_deletions() {
         length: 7,
     };
     let before = BoundarySnapshot {
+        elapsed_ms: 0,
         roots: BTreeSet::from([monitored.clone()]),
         entries: BTreeMap::from([(unknown, entry(10)), (observed.clone(), entry(10))]),
         errors: Vec::new(),
         excluded_artifacts: temp.path().join("artifacts"),
+        excluded_worktrees: BTreeSet::new(),
     };
     let mut after = BoundarySnapshot {
+        elapsed_ms: 0,
         roots: BTreeSet::from([monitored]),
         entries: BTreeMap::from([(observed.clone(), entry(10))]),
         errors: vec![BoundaryError {
@@ -422,10 +428,39 @@ fn boundary_scan_error_does_not_turn_unknown_entries_into_deletions() {
             error: "fixture read_dir interrupted after a partial scan".into(),
         }],
         excluded_artifacts: temp.path().join("artifacts"),
+        excluded_worktrees: BTreeSet::new(),
     };
     assert!(boundary_changes(&before, &after).is_empty());
 
     // A known change remains evidence even when another entry could not be inspected.
     after.entries.insert(observed.clone(), entry(11));
     assert_eq!(boundary_changes(&before, &after), vec![observed]);
+}
+
+#[test]
+fn boundary_prunes_build_trees_and_keeps_source_leaves() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    for name in [
+        "node_modules/a",
+        "target/a",
+        "dist/a",
+        ".git/objects/a",
+        "nested/a",
+    ] {
+        let path = root.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "fixture").unwrap();
+    }
+    let mut snapshot = BoundarySnapshot {
+        elapsed_ms: 0,
+        roots: BTreeSet::new(),
+        entries: BTreeMap::new(),
+        errors: Vec::new(),
+        excluded_artifacts: root.join("artifacts"),
+        excluded_worktrees: BTreeSet::new(),
+    };
+    scan_mtimes(root, &root.join("cwd"), &mut snapshot);
+    assert_eq!(snapshot.entries.len(), 1);
+    assert!(snapshot.entries.contains_key(&root.join("nested/a")));
 }

@@ -441,6 +441,7 @@ fn publish_bundle(
     );
     let report_hash = runtime::sha256(report.as_bytes());
     let handoff = render_handoff(structured, &report_path);
+    metadata["task_type"] = json!(ctx.task_type);
     metadata["run_id"] = json!(ctx.run_id);
     metadata["attempt_id"] = json!(attempt.id);
     metadata["report_sha256"] = json!(report_hash);
@@ -454,13 +455,14 @@ fn publish_bundle(
         json!(material_chars as f64 / handoff.chars().count().max(1) as f64);
     metrics["run_id"] = json!(ctx.run_id);
     metrics["attempt_id"] = json!(attempt.id);
+    metrics["task_type"] = json!(ctx.task_type);
     metrics["role"] = metadata["role"].clone();
     metrics["task_bytes"] = metadata["task_bytes"].clone();
     metrics["target"] = json!(target.name);
     metrics["pool"] = json!(target.pool);
     metrics["family"] = json!(target.family);
     metrics["model"] = metadata["model"].clone();
-    let envelope = json!({"status":"complete","complete":true,"run_id":ctx.run_id,"attempt_id":attempt.id,"target":target.name,
+    let envelope = json!({"task_type":ctx.task_type,"status":"complete","complete":true,"run_id":ctx.run_id,"attempt_id":attempt.id,"target":target.name,
         "pool":target.pool,"family":target.family,"model":metadata["model"],"model_source":metadata["model_source"],"cached":metadata["cached"] == true,
         "report_sha256":report_hash,"handoff":handoff,"metrics":metrics,
         "artifacts":{"report":report_path,"result":attempt.dir.join("result.json"),"handoff":attempt.dir.join("handoff.md"),"metrics":attempt.dir.join("metrics.json")}});
@@ -639,7 +641,8 @@ async fn execute(
         if remaining.is_zero() {
             bail!("total delegation budget exhausted");
         }
-        let id = identity(config, target, packet, task, role)?;
+        let mut id = identity(config, target, packet, task, role)?;
+        id["task_type"] = json!(ctx.task_type);
         let cache = ctx.outdir.as_ref().unwrap().join(".cache").join(format!(
             "{}.json",
             runtime::sha256(&serde_json::to_vec(&id)?)
@@ -648,6 +651,7 @@ async fn execute(
             bail!("cache must not be a symlink");
         }
         let attempt = ctx.attempt(&target.name)?;
+        attempt.update(json!({"model_calls":0,"target":target.name,"pool":target.pool}))?;
         if args.has("resume")
             && resumable(target)
             && let Some(mut cached) = runtime::cache_get(&cache, &id)?
@@ -676,7 +680,18 @@ async fn execute(
         }
         eprintln!("[multi-ai] delegate {role} → {}", target.name);
         let messages = request_messages(packet, task, role, target.alias.is_some())?;
-        let mut metadata = json!({"role":role,"target":target.name,"pool":target.pool,"family":target.family,"task_bytes":task.len(),"cached":false,"complete":false});
+        let mut metadata = json!({"task_type":ctx.task_type,"role":role,"target":target.name,"pool":target.pool,"family":target.family,"task_bytes":task.len(),"cached":false,"complete":false,"model_calls":0});
+        let invocation_started = Instant::now();
+        if let Some(route) = target
+            .route
+            .as_ref()
+            .or_else(|| config.routes.iter().find(|r| r.api_alias == target.alias))
+        {
+            let (revision, known) = crate::scorecard::current_revision(config, route, args)?;
+            metadata["route_revision"] = json!(revision);
+            metadata["model_identity_known"] = json!(known);
+        }
+        attempt.update(metadata.clone())?;
         let execution: Result<(String, bool)> = if let Some(alias) = &target.alias {
             let api_args = api_args(role, remaining.as_millis().min(u64::MAX as u128) as u64);
             let request: Result<ResolvedRequest> = config.resolve_alias(alias, &api_args, messages);
@@ -684,6 +699,8 @@ async fn execute(
                 Err(error) => Err(error),
                 Ok(spec) => {
                     invocations += 1;
+                    metadata["model_calls"] = json!(1);
+                    attempt.update(json!({"model_calls":1}))?;
                     metadata["model"] = json!(spec.model);
                     metadata["model_source"] = json!(spec.model_source);
                     let result = api::request(&spec, &attempt).await;
@@ -713,6 +730,8 @@ async fn execute(
                 ))
             } else {
                 invocations += 1;
+                metadata["model_calls"] = json!(1);
+                attempt.update(json!({"model_calls":1}))?;
                 requests_known = false;
                 let prompt = format!("{SCHEMA}\n\n{}", messages[1]["content"].as_str().unwrap());
                 match delegate_cli::execute(
@@ -747,6 +766,8 @@ async fn execute(
                 }
             }
         };
+        metadata["seconds"] = json!(invocation_started.elapsed().as_secs_f64());
+        attempt.update(metadata.clone())?;
         match execution {
             Ok((raw, _)) => {
                 attempt.write("answer.json.txt", raw.as_bytes())?;

@@ -292,13 +292,9 @@ impl Config {
                 entry["capabilities"]["vision"] =
                     json!(matches_patterns(&provider["visionModels"], &req.model)?);
             } else {
-                let fixed_model = route.explicit_model();
-                entry["model"] = json!(fixed_model);
-                entry["model_source"] = json!(if fixed_model.is_some() {
-                    "route"
-                } else {
-                    "cli-default-unknown"
-                });
+                let (identity, _) = crate::review::cli_identity(&route, self, &Args::default())?;
+                entry["model"] = identity["model"].clone();
+                entry["model_source"] = identity["model_source"].clone();
                 entry["command"] = json!(route.argv.first());
                 entry["capabilities"]["vision"] = Value::Null;
             }

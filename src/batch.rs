@@ -23,6 +23,11 @@ struct Job {
     source_id: Option<String>,
     #[serde(default)]
     text_ready: bool,
+    task_type: Option<String>,
+    #[serde(default)]
+    canaries: Vec<crate::canary::Canary>,
+    #[serde(skip)]
+    resume_routes: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,7 +69,51 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
     let mut ids = HashSet::new();
     let mut prepared = Vec::new();
     let mut pools = HashMap::new();
-    for job in jobs.jobs {
+    let mut auto_routes = HashMap::new();
+    for job in &jobs.jobs {
+        if job.route == "auto" {
+            let task = job
+                .task_type
+                .as_deref()
+                .or(args.get("task-type"))
+                .context("route auto requires task_type")?;
+            auto_routes
+                .entry((
+                    task.to_owned(),
+                    job.text_ready,
+                    fs::canonicalize(relative(base, &job.cwd))?,
+                ))
+                .or_insert_with(Vec::new);
+        }
+    }
+    for ((task, text_ready, cwd), routes) in &mut auto_routes {
+        let count = jobs
+            .jobs
+            .iter()
+            .filter(|j| {
+                j.route == "auto"
+                    && j.text_ready == *text_ready
+                    && j.task_type.as_deref().or(args.get("task-type")) == Some(task.as_str())
+                    && fs::canonicalize(relative(base, &j.cwd)).is_ok_and(|p| p == *cwd)
+            })
+            .count();
+        let mut selection = args.clone();
+        selection.set("cwd", cwd.to_string_lossy());
+        *routes = match crate::scorecard::allocation(config, task, count, *text_ready, &selection) {
+            Ok(routes) => routes,
+            // Cooldown does not invalidate an intact cached result. A route hint is
+            // only used for a strict cache probe below, never as proof of success.
+            Err(error)
+                if args.has("resume")
+                    && error.to_string() == "no eligible routes outside cooldown" =>
+            {
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        };
+        routes.reverse();
+    }
+    for mut job in jobs.jobs {
         if job.id.is_empty()
             || job.id == "."
             || job.id == ".."
@@ -76,6 +125,54 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
         {
             bail!("invalid or duplicate job id: {}", job.id);
         }
+        let automatic = job.route == "auto";
+        if automatic {
+            if args.has("resume")
+                && let Some(outdir) = args.get("outdir")
+            {
+                let path = Path::new(outdir).join(format!("{}.md.cache.json", job.id));
+                let cached = fs::symlink_metadata(&path)
+                    .ok()
+                    .filter(|m| m.is_file() && m.len() <= 32 * 1024 * 1024)
+                    .and_then(|_| fs::read(path).ok())
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+                if let Some(cached) = cached
+                    && let Some(actual) = cached["result"]["route"].as_str()
+                {
+                    let primary = cached["result"]["auto_primary"].as_str().unwrap_or(actual);
+                    let allowed = |id: &str| {
+                        (args.all("only").is_empty() || args.all("only").iter().any(|v| v == id))
+                            && !args.all("exclude").iter().any(|v| v == id)
+                            && config
+                                .route(id, false)
+                                .is_ok_and(|r| r.agentic || job.text_ready)
+                    };
+                    if allowed(primary)
+                        && (allowed(actual) || job.fallback.iter().any(|r| r == actual))
+                    {
+                        job.resume_routes
+                            .extend([primary.to_owned(), actual.to_owned()]);
+                    }
+                }
+            }
+
+            let task_type = job
+                .task_type
+                .as_deref()
+                .or(args.get("task-type"))
+                .context("route auto requires task_type")?;
+            job.route = auto_routes
+                .get_mut(&(
+                    task_type.to_owned(),
+                    job.text_ready,
+                    fs::canonicalize(relative(base, &job.cwd))?,
+                ))
+                .unwrap()
+                .pop()
+                .or_else(|| job.resume_routes.first().cloned())
+                .context("no eligible auto route or authorized resume candidate")?;
+        }
+        crate::canary::validate(&job.canaries)?;
         for name in std::iter::once(&job.route).chain(job.fallback.iter()) {
             let route = config.route(name, false)?;
             pools.entry(route.pool.clone()).or_insert_with(|| {
@@ -90,6 +187,13 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
             bail!("job cwd must be a directory");
         }
         let mut options = args.clone();
+        if automatic {
+            options.set("auto-primary", &job.route);
+        }
+        if let Some(task_type) = &job.task_type {
+            options.set("task-type", task_type);
+        }
+        options.set("canaries-json", serde_json::to_string(&job.canaries)?);
         options.set("cwd", cwd.to_string_lossy());
         if let Some(source) = &job.source_id {
             options.set("source-id", source);
@@ -104,7 +208,10 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
     // Preflight every job before the first adapter invocation.
     let mut work = Vec::new();
     for (job, options, prompt) in prepared {
-        work.push((ctx.job_output(&job.id)?, job, options, prompt));
+        let mut child = ctx.job_output(&job.id)?;
+        child.task_type = options.get("task-type").map(str::to_owned);
+        child.canaries = job.canaries.clone();
+        work.push((child, job, options, prompt));
     }
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
@@ -135,8 +242,11 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
                 if std::time::Instant::now().checked_add(budget_duration).is_none() {
                     bail!("timeout exceeds supported duration");
                 }
+                let resume_routes = if job.resume_routes.is_empty() { routes.clone() } else {
+                    job.resume_routes.iter().map(|id|config.route(id,false)).collect::<Result<Vec<_>>>()?
+                };
                 if let Some(result) =
-                    review::resume_candidate(config, &routes, &options, &prompt, &child, false)
+                    review::resume_candidate(config, &resume_routes, &options, &prompt, &child, false)
                         .await?
                 {
                     return Ok(if *cancellation.borrow() {
@@ -217,6 +327,7 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
                 |e| json!({"status":"error","complete":false,"error":format!("{e:#}")}),
             );
             result["id"] = json!(job.id);
+            result["task_type"] = json!(child.task_type);
             if result["status"] == "ok"
                 && let Err(e) = child.publish(result["output"].as_str().unwrap_or(""))
             {
@@ -269,6 +380,26 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
     ctx.save_status(json!({"status":status,"complete":complete,"results":results}))?;
     let rc = i32::from(!complete);
     ctx.finish(rc)?;
+    eprintln!("id\troute\tstatus\tseconds\trun_id\tattempt_id\tcanary");
+    for row in &results {
+        let text = |key: &str| row[key].as_str().unwrap_or("-");
+        eprintln!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            text("id"),
+            text("route"),
+            text("status"),
+            row["seconds"]
+                .as_f64()
+                .map_or_else(|| "-".into(), |n| format!("{n:.1}")),
+            ctx.run_id,
+            text("attempt_id"),
+            if row["canary_total"].is_number() {
+                format!("{}/{}", row["canary_hits"], row["canary_total"])
+            } else {
+                "-".into()
+            }
+        );
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(

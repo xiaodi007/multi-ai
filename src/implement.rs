@@ -12,8 +12,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    fs::{self, File, OpenOptions},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
     process::Command,
     time::Instant,
@@ -174,18 +177,34 @@ struct BoundarySnapshot {
     entries: BTreeMap<PathBuf, MtimeEntry>,
     errors: Vec<BoundaryError>,
     excluded_artifacts: PathBuf,
+    excluded_worktrees: BTreeSet<PathBuf>,
+    elapsed_ms: u128,
 }
 impl BoundarySnapshot {
     fn summary(&self) -> Result<Value> {
         Ok(
-            json!({"roots":self.roots,"entries":self.entries.len(),"errors":self.errors,
+            json!({"roots":self.roots,"entries":self.entries.len(),"elapsed_ms":self.elapsed_ms,"errors":self.errors,
             "excluded_artifacts":[self.excluded_artifacts],
+            "excluded_worktrees":self.excluded_worktrees,
+            "pruned_directories":["node_modules","target","dist",".git/objects",".claude/skills/synced"],
             "snapshot_sha256":runtime::sha256(&serde_json::to_vec(self)?)}),
         )
     }
 }
 fn scan_mtimes(path: &Path, cwd: &Path, snapshot: &mut BoundarySnapshot) {
-    if path.starts_with(cwd) || path.starts_with(&snapshot.excluded_artifacts) {
+    if (path.starts_with(cwd) && !path.starts_with(cwd.join(".git")))
+        || path.starts_with(&snapshot.excluded_artifacts)
+        || snapshot
+            .excluded_worktrees
+            .iter()
+            .any(|root| path.starts_with(root))
+        || matches!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("node_modules" | "target" | "dist")
+        )
+        || path.ends_with(".git/objects")
+        || path.ends_with(".claude/skills/synced")
+    {
         return;
     }
     let mut scan = || -> Result<()> {
@@ -201,15 +220,18 @@ fn scan_mtimes(path: &Path, cwd: &Path, snapshot: &mut BoundarySnapshot) {
         } else {
             "file"
         };
-        snapshot.entries.insert(
-            path.to_path_buf(),
-            MtimeEntry {
-                kind,
-                mtime_seconds: metadata.mtime(),
-                mtime_nanoseconds: metadata.mtime_nsec(),
-                length: metadata.len(),
-            },
-        );
+        // Directory mtimes change when an excluded child appears; only compare leaf entries.
+        if !metadata.is_dir() {
+            snapshot.entries.insert(
+                path.to_path_buf(),
+                MtimeEntry {
+                    kind,
+                    mtime_seconds: metadata.mtime(),
+                    mtime_nanoseconds: metadata.mtime_nsec(),
+                    length: metadata.len(),
+                },
+            );
+        }
         if metadata.is_dir() {
             for entry in fs::read_dir(path)? {
                 scan_mtimes(&entry?.path(), cwd, snapshot);
@@ -228,43 +250,63 @@ fn boundary_snapshot(
     cwd: &Path,
     previous: &BTreeSet<PathBuf>,
     artifacts: &Path,
+    since: i64,
 ) -> BoundarySnapshot {
+    let clock = Instant::now();
     let mut snapshot = BoundarySnapshot {
+        elapsed_ms: 0,
         roots: previous.clone(),
         entries: BTreeMap::new(),
         errors: Vec::new(),
         excluded_artifacts: artifacts.to_path_buf(),
+        excluded_worktrees: concurrent_worktrees(since),
     };
-    for name in [".claude", ".agents"] {
-        let path = runtime::home().join(name);
+    snapshot.excluded_worktrees.remove(cwd);
+    let claude = runtime::home().join(".claude");
+    let mut sensitive = vec![
+        runtime::home().join(".agents"),
+        claude.join("skills"),
+        claude.join("CLAUDE.md"),
+        claude.join("settings.json"),
+        claude.join("settings.local.json"),
+    ];
+    if let Ok(entries) = fs::read_dir(&claude) {
+        sensitive.extend(entries.flatten().map(|e| e.path()).filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("settings") && n.ends_with(".json"))
+        }));
+    }
+    for path in sensitive {
         snapshot.roots.insert(path.clone());
         // A designated root may itself be a symlink; also inspect its resolved tree.
         if let Ok(resolved) = fs::canonicalize(&path) {
             snapshot.roots.insert(resolved);
         }
     }
-    // Discover again after execution so newly created sibling worktrees are included.
-    let siblings = || -> Result<Vec<PathBuf>> {
-        let mut roots = Vec::new();
-        for entry in fs::read_dir(cwd.parent().context("cwd has no parent")?)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path != cwd && entry.file_type()?.is_dir() && path.join(".git").exists() {
-                roots.push(path);
+    // Only the repository's registered worktrees, never arbitrary sibling repositories.
+    match git(cwd, &["worktree", "list", "--porcelain", "-z"]) {
+        Ok(bytes) => {
+            for field in bytes.split(|b| *b == 0) {
+                if let Some(path) = field.strip_prefix(b"worktree ") {
+                    snapshot
+                        .roots
+                        .insert(PathBuf::from(String::from_utf8_lossy(path).as_ref()));
+                }
             }
         }
-        Ok(roots)
-    };
-    match siblings() {
-        Ok(roots) => snapshot.roots.extend(roots),
         Err(error) => snapshot.errors.push(BoundaryError {
-            path: cwd.parent().unwrap_or(cwd).to_path_buf(),
-            error: format!("sibling worktrees: {error:#}"),
+            path: cwd.into(),
+            error: error.to_string(),
         }),
+    }
+    if let Ok(common) = git_path(cwd, "--git-common-dir") {
+        snapshot.roots.insert(common);
     }
     for path in snapshot.roots.clone() {
         scan_mtimes(&path, cwd, &mut snapshot);
     }
+    snapshot.elapsed_ms = clock.elapsed().as_millis();
     snapshot
 }
 fn boundary_changes(before: &BoundarySnapshot, after: &BoundarySnapshot) -> Vec<PathBuf> {
@@ -275,7 +317,8 @@ fn boundary_changes(before: &BoundarySnapshot, after: &BoundarySnapshot) -> Vec<
         .collect::<BTreeSet<_>>()
         .into_iter()
         .filter(|path| {
-            before.entries.get(*path) != after.entries.get(*path)
+            !before.excluded_worktrees.iter().chain(&after.excluded_worktrees).any(|root|path.starts_with(root))
+                && before.entries.get(*path) != after.entries.get(*path)
                 // Missing entries below an unreadable subtree are unknown, not deletions.
                 && (after.entries.contains_key(*path)
                     || !after.errors.iter().any(|error| path.starts_with(&error.path)))
@@ -283,17 +326,98 @@ fn boundary_changes(before: &BoundarySnapshot, after: &BoundarySnapshot) -> Vec<
         .cloned()
         .collect()
 }
-fn controlled_route(route: &Route, codex: &Path, cwd: &Path) -> Route {
+
+// Durable intervals also cover a concurrent task that finishes before our after-snapshot.
+// A held, close-on-exec lock distinguishes live registrations from crashed old processes.
+struct Registration {
+    path: PathBuf,
+    record: Value,
+    _file: File,
+}
+impl Registration {
+    fn new(cwd: &Path) -> Result<Self> {
+        let root = runtime::state_dir().join("implementations");
+        runtime::private_dir(&root)?;
+        let path = root.join(format!("{}.json", uuid::Uuid::new_v4()));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(path.with_extension("lock"))?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            bail!("cannot register implementation");
+        }
+        let record = json!({"cwd":cwd,"started_ms":chrono::Utc::now().timestamp_millis(),"finished_ms":null});
+        runtime::atomic_json(&path, &record)?;
+        Ok(Self {
+            path,
+            record,
+            _file: file,
+        })
+    }
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.record["finished_ms"] = json!(chrono::Utc::now().timestamp_millis());
+        let _ = runtime::atomic_json(&self.path, &self.record);
+    }
+}
+fn concurrent_worktrees(since: i64) -> BTreeSet<PathBuf> {
+    let mut roots = BTreeSet::new();
+    let Ok(entries) = fs::read_dir(runtime::state_dir().join("implementations")) else {
+        return roots;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|v| v != "json")
+            || !entry.file_type().is_ok_and(|m| m.is_file())
+        {
+            continue;
+        }
+        let Some(record) = fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        else {
+            continue;
+        };
+        let active = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path.with_extension("lock"))
+            .is_ok_and(
+                |f| unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0,
+            );
+        if (active
+            || record["started_ms"].as_i64().is_some_and(|n| n >= since)
+            || record["finished_ms"].as_i64().is_some_and(|n| n >= since))
+            && let Some(cwd) = record["cwd"].as_str()
+        {
+            roots.insert(PathBuf::from(cwd));
+        }
+    }
+    roots
+}
+fn controlled_route(route: &Route, codex: &Path, cwd: &Path, network: bool) -> Route {
     let mut controlled = route.clone();
     let mut argv = vec![
         codex.to_string_lossy().into_owned(),
         "exec".into(),
+        "--json".into(),
         "-C".into(),
         cwd.to_string_lossy().into_owned(),
         "-s".into(),
         "workspace-write".into(),
         "--skip-git-repo-check".into(),
     ];
+    if network {
+        argv.extend([
+            "-c".into(),
+            "sandbox_workspace_write.network_access=true".into(),
+        ]);
+    }
     if let Some(model) = route.explicit_model() {
         argv.extend(["--model".into(), model]);
     }
@@ -329,6 +453,11 @@ fn prepend_paths(config: &Config, args: &Args) -> Result<Vec<PathBuf>> {
 }
 
 pub async fn command(config: &Config, args: &Args) -> Result<i32> {
+    let mut defaults = args.clone();
+    if !defaults.has("task-type") {
+        defaults.set("task-type", "implement");
+    }
+    let args = &defaults;
     if args.positional != ["implement", "codex-cli"] {
         bail!("implementation requires delegate implement codex-cli");
     }
@@ -360,11 +489,21 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
     }
     let _workspace_lock = OutputLock::acquire(&[(cwd.clone(), true)])?;
     let ctx = OutputContext::new(args, "implement", false)?;
+    let registration = Registration::new(&cwd)?;
     let started = Instant::now();
     let attempt = ctx.attempt("codex-cli")?;
     attempt
-        .update(json!({"route":"codex-cli","attempt_id":attempt.id,"cwd":cwd,"model_calls":0}))?;
-    let operation = execute(config, args, &cwd, &attempt, seconds, started).await;
+        .update(json!({"route":"codex-cli","attempt_id":attempt.id,"cwd":cwd,"model_calls":0,"network":args.has("network")}))?;
+    let operation = execute(
+        config,
+        args,
+        &cwd,
+        &attempt,
+        seconds,
+        started,
+        registration.record["started_ms"].as_i64().unwrap(),
+    )
+    .await;
     let mut result = match operation {
         Ok(result) => result,
         Err(error) => json!({"status":"error","complete":false,"error":format!("{error:#}")}),
@@ -376,12 +515,28 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
     result["cwd"] = json!(cwd);
     result["seconds"] = json!(started.elapsed().as_secs_f64());
     result["automatic_commit"] = json!(false);
+    result["network"] = json!(args.has("network"));
+    result["task_type"] = json!(ctx.task_type);
+    result["summary_published"] = json!(false);
+    result["summary_kind"] = json!(if result["status"] == "ok" {
+        "final"
+    } else {
+        "diagnostic"
+    });
     let mut rc = 1;
     if result["status"] == "ok" {
+        result["summary_published"] = json!(true);
         let summary = result["output"].as_str().unwrap_or("");
         ctx.report(&attempt, summary, &result)?;
         ctx.publish(summary)?;
         rc = 0;
+    } else if result["status"] == "boundary_violation"
+        && result["output"].as_str().is_some_and(|s| !s.is_empty())
+    {
+        result["summary_published"] = json!(true);
+        ctx.report(&attempt, result["output"].as_str().unwrap(), &result)?;
+        ctx.publish(result["output"].as_str().unwrap())?;
+        attempt.finish("boundary_violation", review::without_output(&result))?;
     } else {
         attempt.finish(
             result["status"].as_str().unwrap_or("error"),
@@ -390,6 +545,12 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
     }
     ctx.save_status(review::without_output(&result))?;
     ctx.finish(rc)?;
+    if crate::stats::has_boundary_warnings(&result) {
+        eprintln!(
+            "[codex-cli] boundary warnings (unattributed); details={}",
+            result["boundary_details"].as_str().unwrap_or("unknown")
+        );
+    }
     if args.has("json") {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else if rc == 0 {
@@ -401,6 +562,13 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
             result["error"].as_str().unwrap_or("")
         );
     }
+    eprintln!(
+        "multi-ai: status={} exit={} run={} attempt={}",
+        result["status"].as_str().unwrap_or("error"),
+        rc,
+        ctx.run_id,
+        attempt.id
+    );
     Ok(rc)
 }
 
@@ -411,6 +579,7 @@ async fn execute(
     attempt: &Attempt,
     seconds: f64,
     started: Instant,
+    since: i64,
 ) -> Result<Value> {
     let root = git_path(cwd, "--show-toplevel")?;
     if root != cwd {
@@ -427,6 +596,13 @@ async fn execute(
     }
     let config = config.with_path_prepend(&prepend_paths(config, args)?)?;
     let mut route = config.route("codex-cli", false)?;
+    let mut identity_args = args.clone();
+    identity_args.set("cwd", cwd.to_string_lossy());
+    let (identity, model_identity_known) = review::cli_identity(&route, &config, &identity_args)?;
+    let route_revision = crate::scorecard::revision(&route, &identity);
+    attempt.update(
+        json!({"route_revision":route_revision,"model_identity_known":model_identity_known}),
+    )?;
     let task = fs::read_to_string(
         args.get("prompt-file")
             .context("implementation requires --prompt-file")?,
@@ -439,7 +615,7 @@ async fn execute(
         cwd.display(),
         task
     );
-    let mut base = json!({"git_before":before_summary,"preexisting_files":before.dirty_files,"changed_files":[],"pool":route.pool,"family":route.family,"inputBytes":prompt.len(),"model":route.explicit_model(),"model_source":if route.explicit_model().is_some(){"route"}else{"cli-default-unknown"}});
+    let mut base = json!({"route_revision":route_revision,"model_identity_known":model_identity_known,"git_before":before_summary,"preexisting_files":before.dirty_files,"changed_files":[],"pool":route.pool,"family":route.family,"inputBytes":prompt.len(),"model":identity["model"],"model_source":identity["model_source"]});
     if let Some(blocked) = review::blocked(&route.pool) {
         let mut result = base;
         result["status"] = json!("cooldown");
@@ -459,8 +635,13 @@ async fn execute(
         return Ok(result);
     };
     attempt.write("last-message.txt", b"")?;
-    route = controlled_route(&route, &codex, cwd);
-    let boundary_before = boundary_snapshot(cwd, &BTreeSet::new(), &attempt.dir);
+    route = controlled_route(&route, &codex, cwd, args.has("network"));
+    let watch = args
+        .all("watch")
+        .iter()
+        .map(|p| runtime::normalize_path(Path::new(p)))
+        .collect::<Result<BTreeSet<_>>>()?;
+    let boundary_before = boundary_snapshot(cwd, &watch, &attempt.dir, since);
     attempt.write(
         "boundary-before.json",
         &serde_json::to_vec_pretty(&boundary_before)?,
@@ -490,8 +671,20 @@ async fn execute(
     let response =
         review::execute_cli_env(&route, &execution_args, &prompt, attempt, Some(&config)).await;
     // Inspect both independently even when the CLI failed or Git metadata was damaged.
-    let boundary_after = boundary_snapshot(cwd, &boundary_before.roots, &attempt.dir);
-    let violations = boundary_changes(&boundary_before, &boundary_after);
+    let boundary_after = boundary_snapshot(cwd, &boundary_before.roots, &attempt.dir, since);
+    let changes = boundary_changes(&boundary_before, &boundary_after);
+    let events = edit_events(&attempt.dir.join("stdout.raw"), cwd);
+    let buckets = classify_changes(&changes, &boundary_after.roots);
+    let mut violations = events.outside.clone();
+    violations.extend(buckets.get("claude_config").into_iter().flatten().cloned());
+    violations.sort();
+    violations.dedup();
+    attempt.write(
+        "boundary-changes.json",
+        &serde_json::to_vec_pretty(
+            &json!({"buckets":buckets,"attributed_edits":events.outside,"violations":violations}),
+        )?,
+    )?;
     let after = snapshot(cwd);
     attempt.write(
         "boundary-after.json",
@@ -500,7 +693,44 @@ async fn execute(
     let mut result = base;
     result["boundary_before"] = boundary_before.summary()?;
     result["boundary_after"] = boundary_after.summary()?;
-    result["boundary_violations"] = json!(violations);
+    result["attribution"] = json!(if events.available {
+        "available"
+    } else {
+        "unavailable"
+    });
+    result["boundary_details"] = json!(attempt.dir.join("boundary-changes.json"));
+    result["boundary_violations"] = json!(violations.iter().take(20).collect::<Vec<_>>());
+    result["boundary_violation_count"] = json!(violations.len());
+    result["attributed_boundary_count"] = json!(events.outside.len());
+    result["boundary_warnings"] = json!(
+        buckets
+            .iter()
+            .filter(|(k, _)| k.as_str() != "claude_config")
+            .map(|(k, v)| (
+                k,
+                json!({"count":v.len(),"samples":v.iter().take(20).collect::<Vec<_>>()})
+            ))
+            .collect::<BTreeMap<_, _>>()
+    );
+    result["boundary_buckets"] = json!(
+        buckets
+            .iter()
+            .map(|(k, v)| (
+                k,
+                json!({"count":v.len(),"samples":v.iter().take(20).collect::<Vec<_>>()})
+            ))
+            .collect::<BTreeMap<_, _>>()
+    );
+    if let Some(model) = events.model {
+        if result["model"].as_str() != Some(&model) {
+            result["route_revision"] = json!(runtime::sha256(&serde_json::to_vec(
+                &json!({"configured_revision":result["route_revision"], "observed_model":model})
+            )?));
+        }
+        result["model_identity_known"] = json!(true);
+        result["model"] = json!(model);
+        result["model_source"] = json!("codex-event");
+    }
     match response {
         Ok(value) => {
             result["status"] = value["status"].clone();
@@ -586,7 +816,17 @@ async fn execute(
     }
     if result["status"] != "ok" {
         result["complete"] = json!(false);
-        result["output"] = Value::Null;
+        if result["status"] == "boundary_violation"
+            && result["execution_status"] == "ok"
+            && result["output"].is_string()
+        {
+            result["output"] = json!(format!(
+                "# 警告：观察到工作树外变化（boundary_violation）\n\n请核对 status 的 boundary_violations；本轮未通过边界检查，未回滚。\n\n{}",
+                result["output"].as_str().unwrap()
+            ));
+        } else {
+            result["output"] = Value::Null;
+        }
     }
     result["outputBytes"] = json!(result["output"].as_str().map_or(0, str::len));
     attempt.finish(
@@ -594,4 +834,200 @@ async fn execute(
         review::without_output(&result),
     )?;
     Ok(result)
+}
+
+#[derive(Default)]
+struct EditEvents {
+    available: bool,
+    outside: Vec<PathBuf>,
+    model: Option<String>,
+}
+// exec JSONL file_change events describe apply_patch edits. Command execution is opaque:
+// shell redirections cannot be attributed from this stream, so snapshots remain warnings.
+fn edit_events(path: &Path, cwd: &Path) -> EditEvents {
+    let mut result = EditEvents::default();
+    let mut started = false;
+    let mut finished = false;
+    let mut malformed = false;
+    for line in fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+    {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            malformed = true;
+            continue;
+        };
+        match event["type"].as_str() {
+            Some("thread.started") => started = true,
+            Some("turn.completed") => finished = true,
+            Some("item.completed") if event["item"]["type"] == "file_change" => {
+                if let Some(changes) = event["item"]["changes"].as_array() {
+                    for change in changes {
+                        if let Some(path) = change["path"].as_str() {
+                            let path = PathBuf::from(path);
+                            let absolute = if path.is_absolute() {
+                                path
+                            } else {
+                                cwd.join(path)
+                            };
+                            match runtime::normalize_path(&absolute) {
+                                Ok(path) if !path.starts_with(cwd) => result.outside.push(path),
+                                Ok(_) => (),
+                                Err(_) => malformed = true,
+                            }
+                        } else {
+                            malformed = true;
+                        }
+                    }
+                } else {
+                    malformed = true;
+                }
+            }
+            _ => (),
+        }
+        // Some versions emit model metadata; never substitute a model guess.
+        if let Some(model) = event["model"].as_str().filter(|m| !m.trim().is_empty()) {
+            result.model = Some(model.into());
+        }
+    }
+    result.available = started && finished && !malformed;
+    result.outside.sort();
+    result.outside.dedup();
+    result
+}
+fn classify_changes(
+    changes: &[PathBuf],
+    roots: &BTreeSet<PathBuf>,
+) -> BTreeMap<String, Vec<PathBuf>> {
+    let mut buckets: BTreeMap<String, Vec<PathBuf>> = [
+        "git_ignored",
+        "git_internal",
+        "nested_worktree",
+        "sibling_worktree_tracked",
+        "claude_config",
+        "other",
+    ]
+    .into_iter()
+    .map(|k| (k.into(), Vec::new()))
+    .collect();
+    let home = runtime::home();
+    let designated = |path: &Path| {
+        path.starts_with(home.join(".agents"))
+            || path.starts_with(home.join(".claude/skills"))
+            || (path.parent() == Some(home.join(".claude").as_path())
+                && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    n == "CLAUDE.md" || (n.starts_with("settings") && n.ends_with(".json"))
+                }))
+    };
+    let resolved_sensitive = roots
+        .iter()
+        .filter(|p| designated(p))
+        .filter_map(|p| fs::canonicalize(p).ok())
+        .collect::<Vec<_>>();
+    let mut repos = BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+    for path in changes {
+        let components = path
+            .components()
+            .map(|p| p.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let sensitive =
+            designated(path) || resolved_sensitive.iter().any(|root| path.starts_with(root));
+        let bucket = if sensitive {
+            Some("claude_config")
+        } else if components
+            .iter()
+            .position(|c| c == ".git")
+            .is_some_and(|i| {
+                components
+                    .get(i + 1)
+                    .is_some_and(|c| c != "config" && c != "hooks")
+            })
+        {
+            Some("git_internal")
+        } else {
+            None
+        };
+        if let Some(bucket) = bucket {
+            buckets.get_mut(bucket).unwrap().push(path.clone());
+            continue;
+        }
+        if let Some(repo) = path.ancestors().skip(1).find(|p| p.join(".git").exists()) {
+            repos.entry(repo.into()).or_default().push(path.clone());
+        } else {
+            buckets.get_mut("other").unwrap().push(path.clone());
+        }
+    }
+    for (repo, paths) in repos {
+        let mut ignored = BTreeSet::new();
+        for chunk in paths.chunks(128) {
+            let mut cmd = Command::new("/usr/bin/git");
+            cmd.current_dir(&repo)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", runtime::home())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .args([
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "check-ignore",
+                    "-z",
+                ]);
+            cmd.arg("--stdin")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let mut input = Vec::new();
+            for path in chunk {
+                input.extend_from_slice(
+                    path.strip_prefix(&repo)
+                        .unwrap()
+                        .as_os_str()
+                        .as_encoded_bytes(),
+                );
+                input.push(0);
+            }
+            if let Ok(mut child) = cmd.spawn() {
+                let mut stdin = child.stdin.take().unwrap();
+                let writer = std::thread::spawn(move || {
+                    use std::io::Write;
+                    stdin.write_all(&input)
+                });
+                let output = child.wait_with_output();
+                let _ = writer.join();
+                if let Ok(out) = output {
+                    for name in out.stdout.split(|b| *b == 0).filter(|b| !b.is_empty()) {
+                        ignored.insert(repo.join(String::from_utf8_lossy(name).as_ref()));
+                    }
+                }
+            }
+        }
+        let tracked: BTreeSet<PathBuf> = git(&repo, &["ls-files", "-z"])
+            .unwrap_or_default()
+            .split(|b| *b == 0)
+            .filter(|b| !b.is_empty())
+            .map(|b| repo.join(String::from_utf8_lossy(b).as_ref()))
+            .collect();
+        for path in paths {
+            let nested = repo.to_string_lossy().contains("/.claude/worktrees/")
+                || roots
+                    .iter()
+                    .any(|r| repo != *r && repo.starts_with(r) && r.join(".git").exists());
+            let bucket = if ignored.contains(&path) {
+                "git_ignored"
+            } else if nested {
+                "nested_worktree"
+            } else if tracked.contains(&path) {
+                "sibling_worktree_tracked"
+            } else {
+                "other"
+            };
+            buckets.get_mut(bucket).unwrap().push(path);
+        }
+    }
+    buckets
 }

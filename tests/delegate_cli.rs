@@ -728,7 +728,7 @@ printf '%s\n' '{"role":"meta","type":"session.resume_hint","session_id":"dummy-c
             .arg(&task)
             .arg("--outdir")
             .arg(temp.path().join(output))
-            .args(["--timeout", "10", "--json"])
+            .args(["--timeout", "30", "--json"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

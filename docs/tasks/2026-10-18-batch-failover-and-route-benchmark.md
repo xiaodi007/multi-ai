@@ -139,3 +139,34 @@ E 的测法：三类任务，每类 2～3 题，各通路同题，记录耗时�
 - `delegate implement` 首版外层 seatbelt 真机起不来，已按 `2026-10-18-implement-sandbox-fix.md` 修复并安装；K5、K6 两个 Keel 实施任务经它完成。
 - **越界核对在并行任务下误报**：两个 implement 同时跑时，各自把对方工作树的写入、以及宿主会话写 `~/.claude/projects/*.jsonl`、`~/.claude/sessions/`、`~/.claude/skills/synced/` 报成 `boundary_violation`，摘要因此未发布到 `--out`（只在 progress 目录的 last-message.txt）。建议：排除同批其他 implement 任务的 cwd；`~/.claude` 只监测 `skills/`（排除 `synced/`）、`settings*.json`、`CLAUDE.md`，不监测会话与项目记录；越界时仍发布摘要并在顶部标注。
 - 启动前快照约 25 秒（递归扫同级工作树，含 node_modules）。建议跳过 `node_modules`、`target`、`dist`、`.git/objects`。
+
+
+---
+
+A–G 已实现，交接已写回[任务卡](/Users/xiaodi/code/multi-ai/docs/tasks/2026-10-18-batch-failover-and-route-benchmark.md)。全量验收仍受环境限制。
+
+| 项目 | 修改内容 |
+|---|---|
+| A | 四入口支持任务类型，写入元数据和 stats。 |
+| B | 金丝雀支持路径后缀、行号 ±3、正则；本地核对并自动追加绑定报告哈希的反馈。 |
+| C | batch 打印任务身份表；支持 TSV 批量反馈、整批预检和追加更正。 |
+| D | scorecard 按通路×类型汇总精度、召回、耗时、失败率和成本；未知留空，低样本不下结论。 |
+| E | recommend 主力＋约20%探索；auto 支持严格恢复，排除冷却及本地缺依赖的通路。 |
+| F | 提供每条采纳发现的外部秒数、宿主核验分钟、漏报率；文档补充外包判据。 |
+| G | 修复并行边界误报、快照扫描缓存、越界摘要不发布及 routes Broken pipe。 |
+
+README、兼容说明、SKILL.md 和参考文档已同步。
+
+验证使用工作树内临时/状态目录及 Cargo 离线模式：
+
+- `cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`sh tests/test-agent-skills.sh`：通过。
+- `cargo test --locked`：未通过。补充串行 `cargo test --locked --no-fail-fast`：**123通过、35失败、4忽略**；35项均因沙箱拒绝回环 HTTP 监听（EPERM）。评分集7/7、实施12/12、评审22/22通过。
+- `sh scripts/package.sh`：成功；19个文件及归档 SHA-256 校验通过，包内离线冒烟2/2通过。[本地包](/Users/xiaodi/code/multi-ai/dist/multi-ai-0.2.0-aarch64-apple-darwin.tar.gz)。
+
+未完成：35项受限测试需在允许本地监听的环境复验；安装和真机试跑由宿主完成。本轮未提交、推送或发布，真实外部模型调用0次。
+
+宿主示例命令：
+
+```sh
+./dist/multi-ai-0.2.0-aarch64-apple-darwin/bin/multi-ai scorecard --task-type triage --since 2026-10-18 --json
+```

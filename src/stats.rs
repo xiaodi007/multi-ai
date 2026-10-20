@@ -17,6 +17,8 @@ struct Totals {
     skipped: u64,
     in_progress: u64,
     failures: BTreeMap<String, u64>,
+    boundary_warnings: u64,
+    attributed_boundaries: u64,
     timings: Vec<f64>,
     input: u64,
     input_samples: u64,
@@ -86,7 +88,7 @@ fn merge_tree(records: &mut BTreeMap<String, Value>, value: &Value, fallback_id:
     }
 }
 
-fn route(value: &Value, command: &str) -> String {
+pub(crate) fn route(value: &Value, command: &str) -> String {
     if let Some(name) = string(value, &["route", "target"]) {
         return name.into();
     }
@@ -117,7 +119,7 @@ fn route(value: &Value, command: &str) -> String {
     "unknown".into()
 }
 
-fn duration(value: &Value) -> Option<f64> {
+pub(crate) fn duration(value: &Value) -> Option<f64> {
     [
         value["totalMs"].as_f64(),
         value["timings"]["totalMs"].as_f64(),
@@ -147,6 +149,20 @@ fn output_bytes(value: &Value) -> Option<u64> {
             .into_iter()
             .find_map(|v| v.as_str().map(|s| s.len() as u64))
         })
+}
+
+pub(crate) fn execution_success(value: &Value) -> bool {
+    if let Some(status) = value["execution_status"].as_str() {
+        return status == "ok"
+            && value["response"]["complete"] == true
+            && value["response"]["exitCode"] == 0;
+    }
+    matches!(value["status"].as_str(), Some("ok" | "complete")) && value["complete"] != false
+}
+pub(crate) fn has_boundary_warnings(value: &Value) -> bool {
+    value["boundary_warnings"]
+        .as_object()
+        .is_some_and(|b| b.values().any(|v| v["count"].as_u64().unwrap_or(0) > 0))
 }
 
 impl Totals {
@@ -181,7 +197,10 @@ impl Totals {
             return;
         }
         self.calls += 1;
-        if ["ok", "complete"].contains(&status) && value["complete"] != false {
+        self.boundary_warnings += u64::from(has_boundary_warnings(value));
+        self.attributed_boundaries +=
+            u64::from(value["attributed_boundary_count"].as_u64().unwrap_or(0) > 0);
+        if execution_success(value) {
             self.successful += 1;
         } else {
             *self.failures.entry(status.into()).or_default() += 1;
@@ -215,7 +234,7 @@ impl Totals {
             "success_rate_pct":(self.calls > 0).then(|| self.successful as f64 * 100.0 / self.calls as f64),
             "median_ms":median,"p90_ms":p90,"timing_samples":n,
             "cached":self.cached,"skipped":self.skipped,"in_progress":self.in_progress,
-            "failures":self.failures,
+            "failures":self.failures,"boundary_warning_count":self.boundary_warnings,"attributed_boundary_count":self.attributed_boundaries,
             "input_bytes":(self.input_samples > 0).then_some(self.input),"input_bytes_samples":self.input_samples,
             "output_bytes":(self.output_samples > 0).then_some(self.output),"output_bytes_samples":self.output_samples
         })
@@ -223,7 +242,13 @@ impl Totals {
 }
 
 /// Missing metrics stay null; neither current configuration nor report files fill gaps.
-pub fn collect(state: &Path) -> Result<Value> {
+pub(crate) struct RunRecords {
+    pub directory: PathBuf,
+    pub manifest: Value,
+    pub attempts: Vec<Value>,
+}
+
+pub(crate) fn records(state: &Path) -> Result<(Vec<RunRecords>, Value)> {
     let runs_dir = state.join("runs");
     let entries = match fs::read_dir(&runs_dir) {
         Ok(entries) => Some(entries),
@@ -231,7 +256,7 @@ pub fn collect(state: &Path) -> Result<Value> {
         Err(error) => return Err(error).context("read local run records"),
     };
     let (mut runs, mut invalid, mut missing_progress, mut attempts) = (0, 0, 0, 0);
-    let mut totals = BTreeMap::<String, Totals>::new();
+    let mut loaded = Vec::new();
     for entry in entries.into_iter().flatten() {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -287,18 +312,56 @@ pub fn collect(state: &Path) -> Result<Value> {
             missing_progress += 1;
         }
         attempts += records.len();
-        for value in records.values() {
-            totals.entry(route(value, command)).or_default().add(value);
+        let mut values: Vec<_> = records.into_values().collect();
+        for value in &mut values {
+            if value["task_type"].is_null() {
+                value["task_type"] = manifest["task_type"].clone();
+            }
+            value["recorded_route"] = json!(route(value, command));
+        }
+        loaded.push(RunRecords {
+            directory: entry.path(),
+            manifest,
+            attempts: values,
+        });
+    }
+    Ok((
+        loaded,
+        json!({"schema_version":1,"state_dir":state,"runs":runs,"attempts":attempts,
+        "invalid_records":invalid,"missing_progress_runs":missing_progress}),
+    ))
+}
+
+/// Missing metrics stay null; neither current configuration nor report files fill gaps.
+pub fn collect(state: &Path) -> Result<Value> {
+    let (runs, mut report) = records(state)?;
+    let mut totals = BTreeMap::<String, Totals>::new();
+    let mut typed = BTreeMap::<(String, Option<String>), Totals>::new();
+    for run in runs {
+        for value in run.attempts {
+            let route = value["recorded_route"].as_str().unwrap().to_owned();
+            let task_type = value["task_type"].as_str().map(str::to_owned);
+            totals.entry(route.clone()).or_default().add(&value);
+            typed.entry((route, task_type)).or_default().add(&value);
         }
     }
-    let rows: Vec<Value> = totals
-        .into_iter()
-        .map(|(route, totals)| totals.value(route))
-        .collect();
-    Ok(
-        json!({"schema_version":1,"state_dir":state,"runs":runs,"attempts":attempts,
-        "invalid_records":invalid,"missing_progress_runs":missing_progress,"routes":rows}),
-    )
+    report["routes"] = json!(
+        totals
+            .into_iter()
+            .map(|(route, totals)| totals.value(route))
+            .collect::<Vec<_>>()
+    );
+    report["task_types"] = json!(
+        typed
+            .into_iter()
+            .map(|((route, task_type), totals)| {
+                let mut row = totals.value(route);
+                row["task_type"] = json!(task_type);
+                row
+            })
+            .collect::<Vec<_>>()
+    );
+    Ok(report)
 }
 
 fn metric(value: &Value, decimals: usize) -> String {
@@ -312,7 +375,19 @@ pub fn command(args: &Args) -> Result<i32> {
         .get("state-dir")
         .map(PathBuf::from)
         .unwrap_or_else(runtime::state_dir);
-    let report = collect(&state)?;
+    let mut report = collect(&state)?;
+    if let Some(task) = args.get("task-type") {
+        report["routes"] = json!(
+            report["task_types"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["task_type"].as_str() == Some(task))
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        report["task_type"] = json!(task);
+    }
     if args.has("json") {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

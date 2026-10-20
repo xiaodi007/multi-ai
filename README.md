@@ -123,7 +123,7 @@ multi-ai text run --task vision-review --image screenshot.png --out vision.md
 |---|---|---|---|
 | `agy-cli` | `agy` | `google` | 固定 `gemini-3.8-flash-high` |
 | `grok-cli` | `grok` | `xai` | CLI 默认，未知 |
-| `codex-cli` | `codex` | `openai` | CLI 默认，未知 |
+| `codex-cli` | `codex` | `openai` | 共用配置解析；取不到保持 unknown |
 | `glm-api` | `glm` | `zhipu` | profiles 别名 `glm` |
 | `deepseek-pro-api` | `deepseek` | `deepseek-api` | profiles 别名 `deepseek-pro` |
 | `claude-deepseek-cli` | `claude-ds` | `deepseek-api` | Claude Code 壳配置 |
@@ -157,7 +157,7 @@ multi-ai feedback --run RUN-UUID --report ATTEMPT-ID \
   --evidence '依据实际测试结果及需求逐项核验；证据位置：…'
 ```
 
-至少提供一个数量及证据；不知道的数量或筛选／返工时间留空。反馈绑定报告哈希并追加保存，更正需录入新的事件，原记录保留。默认 `source=agent`；只有用户明确决定，才可加 `--source human --human-confirmed` 并记录其明确意见。模型的 `CONFIRMED` 和测试通过都不自动代表人工采纳。反馈不自动评分、不改变调度排序。
+至少提供一个发现数量或实施字段及证据；不知道的数量或筛选／返工时间留空。反馈绑定报告哈希并追加保存，更正需录入新的事件，原记录保留。默认 `source=agent`；只有用户明确决定，才可加 `--source human --human-confirmed` 并记录其明确意见。模型的 `CONFIRMED` 和测试通过都不自动代表人工采纳。`scorecard` 汇总实际反馈；`recommend` 提供显式建议，普通 run/review 保留既有选路行为，batch 仅在 `route: "auto"` 时应用建议。
 
 完整兼容语义和边界见 [COMPATIBILITY.md](docs/COMPATIBILITY.md)。
 
@@ -210,8 +210,95 @@ multi-ai delegate implement codex-cli \
 
 `--cwd` 必须是现存 Git 工作树顶层；主工作树和 linked worktree 都支持。默认拒绝任何未提交修改；确需在已有修改上继续时显式加 `--allow-dirty`，已有文件内容会参与前后比较。`--out` 放在工作树之外，避免输出锁与实施目录锁相互冲突。`--path-prepend` 可重复，仅影响子进程 PATH，不修改 shell 配置。`--timeout` 使用秒。
 
-此入口固定调用 `codex exec -C <cwd> -s workspace-write --skip-git-repo-check -o <暂存摘要>`，不再套外层 macOS sandbox，也不额外覆盖 Codex 的网络配置。写入边界由 Codex 自带的 `workspace-write` 加事后核对负责。仍需在提示中明确授权要读取、修改的材料；写权限限制不等于读取材料范围的自动证明。
+此入口固定调用 `codex exec --json -C <cwd> -s workspace-write --skip-git-repo-check -o <暂存摘要>`，不再套外层 macOS sandbox。默认不额外覆盖 Codex 的网络配置；显式加 `--network` 时追加 `-c sandbox_workspace_write.network_access=true`，status 记录 `network: true`，否则记录 `false`。开启后 Codex 执行的命令能访问任意网络地址（包括远端），事后的 Git/mtime 核对看不到网络写入。建议宿主只在任务书里给本机私有库的连接串；数据库、对象存储由宿主预先启动，实施方连接使用。此入口不提供 `danger-full-access` 选项。写入边界由 Codex 自带的 `workspace-write` 加事后核对负责。仍需在提示中明确授权要读取、修改的材料；写权限限制不等于读取材料范围的自动证明。
 
-运行前后记录 HEAD、`git status --porcelain` 和 Git 可见文件身份，并递归记录 cwd 外同级 Git 工作树、`~/.claude`、`~/.agents` 的 mtime 快照（仅排除本次受管理产物目录；内部符号链接只记录链接本身）。摘要列出本轮变化文件并区分原有修改；Git 忽略的缓存等文件不进入该文件清单。事后发现监测范围内的越界变化时，在 `<summary>.status.json` 标为 `boundary_violation` 并列出路径，只报告、不回滚。快照无法发现通过网络写远端、监测范围外的写入，以及两次快照间已消失或恢复 mtime 的写入；并发进程的变化也无法仅凭快照归因给 Codex。
+运行前后记录 HEAD、`git status --porcelain` 和 Git 可见文件身份。默认只通过 `git worktree list` 扫描所属仓的注册工作树、共享 Git 元数据、`~/.agents` 和 Claude 配置（skills、settings*.json、CLAUDE.md），不遍历父目录所有兄弟仓。可重复 `--watch PATH` 追加范围。保留构建目录、会话目录剪枝和并发受管工作树排除；快照记录叶条目数及 `elapsed_ms`，内部符号链接不递归跟随。
+
+Codex JSONL 的 `item.completed` / `file_change` / `changes[].path` 用于编辑归因：解析后的目标在 cwd 外即为归因越界，包括经符号链接指向外部的目标。快照差异分为 `git_ignored`、`git_internal`（.git 下除 config/hooks）、`nested_worktree`、`sibling_worktree_tracked`、`claude_config`（含 .agents）与 `other`。只有归因越界和 Claude 配置变化判 `boundary_violation`，不回滚。其余进入 `boundary_warnings`，执行完整成功时继续使用兼容状态 **`status=ok, complete=true, exitCode=0`**。警告表示观测到外部变化，不代表由实施方造成，也不证明没有其它写入。事件流缺失、损坏或未正常结束时标 `attribution=unavailable`，快照继续按上述规则核对。shell 命令事件不提供可靠写入目标，不能从其命令文本猜测归因。
+
+status 每桶保存计数和最多 20 条样例，`boundary_violations` 也最多 20 条；完整差异和归因路径位于 `boundary_details` 指向的 artifacts/boundary-changes.json。完整摘要原子发布并登记为 run/attempt 报告，包括归因越界或 Claude 配置越界时的诊断摘要；此时保留非零退出、`complete=false`。`summary_published` 表示本轮是否发布，`summary_kind=final|diagnostic` 区分正式和诊断摘要。执行失败、超时或空正文继续保留上一份完整摘要。快照看不到网络写入、监测范围外或两次扫描间已恢复的变化。正常收尾的 stderr 最后一行固定为 `multi-ai: status=<status> exit=<code> run=<run_id> attempt=<attempt_id>`。
 
 不自动提交，不支持实施恢复缓存。失败、取消、超时或额度耗尽均记录在 `<summary>.status.json`，失败保留上一份完整摘要；目录和输出冲突均在启动 Codex 前失败。测试不会调用真实外部模型。
+
+
+## 怎么选模型、怎么给分
+
+派活前先读 [route-traits](integration/skills/multi-ai/references/route-traits.md)，再看本机成绩。`run`、`review`、`batch --task-type X`、`delegate` 接受自由字符串任务类型；batch 每项的 `task_type` 覆盖全局值。建议 `triage`、`review`、`investigate`、`extract`、`implement`、`walkthrough`。任务类型保存在 manifest、metadata、status 和 stats 的 `task_types` 分组中；`delegate implement` 省略时默认 `implement`；其他旧记录缺字段为 null，不猜类型。`stats --task-type X` 可筛选调用统计。
+
+```sh
+multi-ai scorecard --task-type triage --since 2026-10-18 --json
+multi-ai recommend --task-type triage --jobs 10 --cwd /path/to/work --only kimi-k3-cli grok-cli
+multi-ai run kimi-k3-cli --task-type triage --prompt-file brief.md \
+  --cwd /path/to/work --out review.md --canary-file canaries.json
+```
+
+`canaries.json` 是数组，或直接放进 batch 每项的 `canaries` 字段：
+
+```json
+[
+  {"match": "src/check.rs:42", "expect": "真问题"},
+  {"match": "冗余.*保护", "expect": "真问题"}
+]
+```
+
+金丝雀从**宿主已经确认的事实**产生，不要用模型自己的结论当金丝雀；答案不发给模型。金丝雀只能测召回，测不了精度。位置允许路径后缀和行号 ±3；其他 match 按 Rust 正则匹配，有歧义时可显式加 `regex:` 前缀。核对范围是一条表格行或一个空行分隔的发现段落，位置和判定必须同处此范围；带明确判定的 Markdown 标题会承接其后的空行、子标题和证据列表；建议输出 `位置 | 判定 | 证据` 的表格。真问题识别 `真问题/属实/确认/CONFIRMED/accepted` 等标签，`误报/待定/REFUTED/UNCLEAR` 等优先否定；只提位置、没有明确判定不计命中。其他 expect 要在同范围出现原文。它是文本核对，不是语义裁判，宿主仍须抽查格式和证据。报告完成后 status 写 `canary_hits/canary_total/canary_results`，并追加绑定报告哈希的 `source=canary` 反馈；失败或 partial 不自动记成功。
+
+batch 保留 stdout JSON，同时在 stderr 打印 `id、route、status、seconds、run_id、attempt_id、canary` 表。用 TSV 一次录入宿主核验结果：
+
+```sh
+multi-ai feedback --batch results --from verdicts.tsv
+```
+
+TSV 首行为 `id<Tab>accepted<Tab>false_positive<Tab>uncertain<Tab>evidence`，每项一行；未知数量留空，至少一个数量或实施字段已知，evidence 必填。可再加 `screen_min`、`rework_min`（分钟）、`outcome`、`rework_items`、`rework_rounds`、`defect_tags` 列；实施反馈可以把发现数量列留空。默认 source=agent；human 仍需用户明确决定和 `--source human --human-confirmed`。全部行预检通过后才追加；无当前完整报告、正文被修改或不存在的 id 会拒绝整次导入；已登记的完整越界诊断摘要也可录入。更正继续追加，成绩单对同份报告每个字段取最后一个已知值，不把更正重复相加。缓存上的反馈归回原始调用，避免恢复次数虚增成绩。
+
+`scorecard [--task-type X] [--since YYYY-MM-DD] [--json]` 只读本地历史，不加载 API 配置或凭据。按「通路 × 任务类型」输出：
+
+| 指标 | 口径 |
+|---|---|
+| 样本数、失败率 | 真实适配调用；缓存、冷却跳过、未启动和进行中不计。失败细分 quota、rate_limit、timeout；失败也计耗时。 |
+| 精度 | accepted / (accepted + false_positive)；只用两个字段均已知的报告；重复和待定不进分母。 |
+| 金丝雀召回、漏报率 | 命中 / 已知答案总数；漏报率 = 1 − 召回。缓存不重复累计。 |
+| 中位数、P90 | 单位秒；偶数中位取平均，P90 用 nearest rank。JSON 比率为 0～1。 |
+| 外部秒数 / 采纳发现 | 对有耗时且采纳数已知的完整报告，加上有耗时的失败调用，除以配对样本的采纳数。 |
+| 宿主核验分钟 / 采纳发现 | 对 screen-min 和采纳数均已知的报告配对计算；不猜未知时间。 |
+
+JSON 同时给出各项样本覆盖、数量已知样本数、通路版本指纹及损坏记录数。缺失指标为 null，零采纳时每条采纳成本也为 null。调用少于 5 一律标「样本不足」；给优劣结论还要求至少 5 份成对精度反馈和 5 份含金丝雀报告。历史 text 别名继续单列，不能按当前配置冒认旧模型身份。`--since` 按调用启动日期（UTC）筛选，缺日期的旧记录在有日期过滤时不纳入。
+
+`recommend --task-type X [--jobs N]` 默认 N=10；主力取精度×召回最高的可比较通路，约 20% 留给样本不足的通路。没有足够证据时均匀探索，不下优劣结论；5 项以上按最大余数取整，小批次按真实历史补探索欠额。模型、CLI 可执行/配置指纹变化后，仅使用当前身份的样本重新积累；未知默认模型身份不会得到主力结论。冷却池、本地缺 CLI 或未配置 API 凭据的通路排除；这仍不保证登录和账户可用。`--only/--exclude` 收窄候选，`--cwd` 使本地 CLI 配置与实际执行目录一致。普通 run/review 排序不变。
+
+batch 清单可写 `route: "auto"`，同时指定 `task_type`；按任务类型、材料是否 text_ready、实际 cwd 分组套用上述建议。需要 API 的任务必须声明 `text_ready: true`；否则只选能读 cwd 的通路。保留显式 fallback 的 quota 备援规则；可用 batch 的 `--only/--exclude` 收窄 auto 候选。宿主须先取得对候选模型和材料范围的授权。
+
+判断是否外包的判据是：**宿主核验成本＋漏报率×返工成本 < 宿主自己做的成本**。multi-ai 提供前两项的实测数（核验分钟和漏报率）及外部耗时；返工成本与宿主自己做的成本由宿主估计，不假装能自动算出收益，更不把外部秒数当作 token 或费用节省。样本少或漏报高时，应先修判据、补宿主已知答案和同题核验，再扩大委派。
+
+### 实施反馈与旧记录重判（2026-10-21）
+
+```sh
+multi-ai feedback --run RUN --report ATTEMPT \
+  --outcome merged-after-rework --rework-items 2 --rework-rounds 1 \
+  --defect-tags criterion-duplicated,id-collision --rework-min 15 --screen-min 8 \
+  --evidence '宿主复核与实际门禁证据'
+multi-ai scorecard --task-type implement --json
+multi-ai recommend --task-type implement --cwd WORKTREE --only codex-cli --json
+```
+
+`outcome` 取 `merged`、`merged-after-rework`、`discarded`；`rework-items` 是宿主返工条数，`rework-rounds` 是另派返工轮数，未知留空。`defect-tags` 是逗号分隔的自由字符串，可用空值更正为空列表。建议标签：`criterion-duplicated`、`id-collision`、`comment-format-churn`、`pagination-clears-data`、`sort-tiebreak`、`performance`、`browser-only`。旧 accepted/false-positive 字段继续可用，更正逐字段追加，标签列表整体替换；source 默认 agent。
+
+成绩单按通路×任务类型分组，并将已记录的不同模型分开（model=null 不冒认身份）。失败率只计执行失败；外部变化警告、归因越界及 Claude 配置越界各自计次数，不因政策状态重复算执行失败。若越界同时执行失败，仍按内层执行原因计失败。实施格子显示反馈样本数、合入率（merged 与 merged-after-rework 合计 / 已知 outcome）、返工后合入率、弃用率、平均返工条数和轮数、缺陷标签直方图、中位/P90 秒，不给 precision。平均值只用对应已知字段，JSON 保留覆盖数。至少 5 次调用、5 份 outcome 和 5 份返工条数才可比较；recommend 优先合入率，平手取较少返工，保留探索与身份门槛。
+
+Codex 模型解析与 routes 展示共用解析器：显式模型优先，否则从配置顶层 model 取唯一确定的值；配置冲突或未知则 model=null、model_source=cli-default-unknown，不猜 profile。若事件明确带 model，以实测值记录；和配置不同会拆开版本身份，不把旧成绩冒认为当前配置。未知默认模型仍不提供恢复成功缓存或主力结论。
+
+旧的快照误报可离线重判。先停止相关 multi-ai 写入，备份历史目录；脚本需要 Python 3（工具本体不依赖 Python）。默认只预演，每条旧 status 重复一个 `--status`：
+
+```sh
+python3 scripts/reclassify-implement.py --state-dir STATE \
+  --status SUMMARY.md.status.json
+# 核对 eligible 后追加 --apply；发布包中脚本位于包根目录
+python3 scripts/reclassify-implement.py --state-dir STATE \
+  --status SUMMARY.md.status.json --apply
+# 再用原 run/attempt 补录实施反馈
+multi-ai feedback --run RUN --report ATTEMPT --outcome merged \
+  --rework-items 0 --evidence '宿主复核证据'
+multi-ai scorecard --task-type implement --json
+```
+
+判据：只处理没有 attribution 的旧 boundary_violation；response.status=ok、response.complete=true、response.exitCode=0、summary_published=true、Git 检查正常，且当前发布摘要以完整非空 last-message 正文结尾。校验 run/attempt、manifest、status 和 artifacts 路径身份。宿主显式应用才将旧未归因变化重判为警告、缺失类型补 implement，并登记绑定 SHA-256 的摘要；不推断采纳、返工或历史模型。保留原诊断正文与 `summary_kind=diagnostic`，原始元数据备份到 artifacts/legacy-before-reclassification.json，完整旧越界路径也在该备份。所有记录先预检，文件逐个原子替换，manifest 最后发布；进程中断需从备份人工恢复后重试，不在有并发写入时执行。同一 run 一次仅修一个 attempt。无法满足完整性判据的记录拒绝重判。

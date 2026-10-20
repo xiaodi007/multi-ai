@@ -4,7 +4,21 @@ Measured on 2026-10-17/18 in one Keel session: about 60 calls over three rounds 
 
 Implementation update on 2026-10-18 (offline, no new model measurements): native `batch` now handles per-pool concurrency, explicit fallback, backoff and exact-result resume. `stats` summarizes local history; `delegate implement codex-cli` provides the controlled code-writing route. The measurements below retain their original dates and workload.
 
-## Which route for which job
+## 怎么选模型、怎么给分（每次派活前）
+
+以下历史偏好需要结合任务类型和本机成绩，不能当永久排名。先看 `scorecard --task-type X --json`，再 `recommend --task-type X --jobs N --cwd WORKTREE --only AUTHORIZED_ROUTES…`；始终收窄到用户授权的通路和材料。每次 run/review/delegate 带 `--task-type X`，batch 逐项写 task_type。recommend 不联网，只检查本地依赖、配置和冷却；就绪不代表登录或额度健康。
+
+2026-10-18 宿主甄别反馈（用户提供，未在本轮重新调用模型）：Kimi 判真5条，核实5条属实；Grok 判真2条，核实0条属实。金丝雀0/2来自宿主提示判据漏了“冗余”类别，不能直接归罪模型。这里是发现条数，不能冒充5份独立核验报告；本轮没有将这些文字重复导入本地反馈。它提示了历史“Grok 主力”的结论需要按任务重新验，尚不足以宣布模型普遍优劣。
+
+先从宿主确认的事实制作已知答案，用 `run --canary-file canaries.json` 或 batch 每项 canaries。格式 `[ {"match":"src/a.rs:42","expect":"真问题"} ]`；match 也可为正则（有歧义时加 `regex:` 前缀），位置按路径后缀/行号±3，要求同表格行或同发现段落有判定；明确判定标题可承接后续证据列表。答案留在本地，报告生成后自动写 source=canary。金丝雀只能测召回，测不了精度；不要用模型自己的结论当真值。召回异常先检查提示判据和输出格式，再评模型。
+
+宿主核验后录 `feedback --accepted N --false-positive N --screen-min MIN --evidence TEXT`，未知项留空。批量可 `feedback --batch results --from verdicts.tsv`；TSV 首5列 id/accepted/false_positive/uncertain/evidence，以Tab分隔，可加screen_min/rework_min。更正追加但不重复相加，缓存反馈归回原调用。source=agent 是默认；human 必须有用户明确决定。
+
+发现类 scorecard 按通路×任务类型显示精度、召回、失败率、秒数中位/P90和每采纳发现成本。调用不足5标样本不足；主力比较还需5份成对精度反馈及5份含金丝雀报告。模型/CLI指纹变化后，recommend 只使用新身份样本；以精度×召回选主力，约20%给未测充分通路，无主力则均匀探索，小批次按历史补欠额。冷却、缺CLI或无API凭据的路线排除。batch route:auto 按类型、cwd和text_ready分组，仍可用--only/--exclude限范围。
+
+是否外包由宿主判断：`宿主核验成本＋漏报率×返工成本 < 宿主自己做的成本`。工具给外部秒数/采纳、宿主核验分钟/采纳和漏报率及有效样本数；返工成本、自己做的成本需要宿主估计，不自动宣称省token。
+
+## Which route for which job (historical observations)
 
 | Job | First choice | Second choice | Avoid |
 |---|---|---|---|
@@ -52,3 +66,12 @@ Implementation update on 2026-10-18 (offline, no new model measurements): native
 - Use `multi-ai batch --jobs jobs.json --outdir results --resume`, with one prompt per job and explicit per-pool limits. Complete results are reused only when identity and body hash still match; unknown model identities are rerun. The historical batch used a shell wrapper and per-route `xargs -P` limits.
 - On a quota error, configure another pool in the job's `fallback` list (or `run --fallback ROUTE`). The 10-18 scheduler switches immediately and skips a cooled pool. Rate-limit errors such as 1302 retry with backoff. The historical run required the wrapper to perform this switch.
 - The historical zsh `xargs` wrapper could fail with "command line cannot be assembled" when embedding long strings. Native `batch` reads prompt files and avoids that shell assembly path.
+
+
+## 实施结果
+
+implement 默认类型不必重复传参。派活后先检查 attribution、boundary_warnings、summary_kind；快照警告只表示观测到外部变化，不能归因给 Codex。完整归因越界诊断报告仍可 feedback，执行失败/partial 不算完整报告。
+
+用 --outcome merged|merged-after-rework|discarded、--rework-items N、--rework-rounds N、--defect-tags tag1,tag2 和 --evidence 录宿主结论，未知数留空，沿用 --screen-min/--rework-min（分钟）。建议标签 criterion-duplicated/id-collision/comment-format-churn/pagination-clears-data/sort-tiebreak/performance/browser-only。TSV 增加同名下划线列；更正按字段最后已知值，标签整体替换。
+
+实施成绩单按历史 model 区分身份，以已知 outcome 算合入率、返工后合入率、弃用率，按已知数计算平均返工条数/轮数，给缺陷直方图及中位/P90 秒，不计算 precision。警告/归因单列，不计执行失败；越界同时执行失败仍按内层原因计失败。主力比较需至少5次调用、5份 outcome 和5份返工条数，合入率优先、低返工次序。换模型、身份未知或样本不足继续探索。旧快照误报可离线重判后补录；只认完整内层 response exit 0 和与 last-message 对应的完整摘要，不猜历史 model。
