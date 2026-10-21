@@ -192,6 +192,111 @@ fn workspace_status_line(line: &str) -> bool {
         && b" MADRCU?!T".contains(&bytes[1])
 }
 
+/// Extract only vendor diagnostics. Never let structured tool/assistant payloads
+/// become authentication, quota or transport evidence. Codex stdout is strictly
+/// JSONL; other adapters retain unstructured diagnostics outside tool blocks.
+pub fn diagnostic_text(vendor: &str, stdout: &str, stderr: &str) -> String {
+    // Unknown envelopes retain the legacy fallback after recursively removing
+    // known material channels, including tool results nested inside messages.
+    fn fallback(value: &Value) -> Value {
+        match value {
+            Value::Object(fields) => {
+                let kind = value["type"].as_str().unwrap_or("");
+                if kind.starts_with("item.")
+                    || matches!(
+                        kind,
+                        "assistant"
+                            | "user"
+                            | "system"
+                            | "result"
+                            | "tool"
+                            | "tool_result"
+                            | "tool_output"
+                            | "agent_message"
+                            | "command_execution"
+                            | "stream_event"
+                    )
+                    || matches!(
+                        value["role"].as_str(),
+                        Some("assistant" | "user" | "tool" | "system" | "meta")
+                    )
+                {
+                    return Value::Null;
+                }
+                Value::Object(
+                    fields
+                        .iter()
+                        .filter(|(key, _)| {
+                            !matches!(
+                                key.as_str(),
+                                "item"
+                                    | "aggregated_output"
+                                    | "tool_result"
+                                    | "tool_output"
+                                    | "tool_calls"
+                            )
+                        })
+                        .map(|(key, value)| (key.clone(), fallback(value)))
+                        .collect(),
+                )
+            }
+            Value::Array(values) => Value::Array(values.iter().map(fallback).collect()),
+            _ => value.clone(),
+        }
+    }
+    let codex = matches!(vendor, "codex" | "codex-cli");
+    let mut diagnostics = vec![stderr.to_owned()];
+    let mut tool_block = false;
+    for line in stdout.lines() {
+        if tool_block {
+            if line.contains("</tool_result>") || line.contains("</tool_output>") {
+                tool_block = false;
+            }
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            if !codex {
+                let trimmed = line.trim();
+                if trimmed.contains("<tool_result") || trimmed.contains("<tool_output") {
+                    tool_block = true;
+                }
+                if tool_block {
+                    if trimmed.contains("</tool_result>") || trimmed.contains("</tool_output>") {
+                        tool_block = false;
+                    }
+                } else {
+                    diagnostics.push(line.to_owned());
+                }
+            }
+            continue;
+        };
+        let kind = row["type"].as_str().unwrap_or("");
+        if kind == "error" || kind == "turn.failed" {
+            for value in [&row["message"], &row["error"]["message"], &row["error"]] {
+                if let Some(message) = value.as_str() {
+                    diagnostics.push(message.to_owned());
+                }
+            }
+        } else if !codex {
+            // Grok terminal errors carry errors[] or result; a success result
+            // and all assistant/user/tool events are answer/material channels.
+            if kind == "result" && row["is_error"] == true {
+                if let Some(message) = row["result"].as_str() {
+                    diagnostics.push(message.to_owned());
+                }
+                for value in row["errors"].as_array().into_iter().flatten() {
+                    if let Some(message) = value.as_str().or_else(|| value["message"].as_str()) {
+                        diagnostics.push(message.to_owned());
+                    }
+                }
+            } else {
+                diagnostics.push(fallback(&row).to_string());
+            }
+        }
+    }
+    diagnostics.join("\n")
+}
+
 /// Do not classify input-size problems as wallet exhaustion, or echoed prompts as errors.
 pub fn classify(text: &str, rc: i32, timed_out: bool, prompt: &str) -> String {
     if timed_out {
@@ -207,7 +312,7 @@ pub fn classify(text: &str, rc: i32, timed_out: bool, prompt: &str) -> String {
         .filter(|line| !workspace_status_line(line))
         .collect::<Vec<_>>()
         .join("\n");
-    let re=Regex::new(r"Error \[(truncated|incomplete|empty|headers_timeout|idle_timeout|total_timeout|auth|quota|rate_limit|transport|cancelled)\]").unwrap();
+    let re=Regex::new(r"Error \[(truncated|incomplete|empty|headers_timeout|idle_timeout|total_timeout|auth|quota|rate_limit|capacity|transport|cancelled)\]").unwrap();
     if let Some(c) = re.captures_iter(&clean).last() {
         return if c[1].ends_with("timeout") {
             "timeout".into()
@@ -232,8 +337,12 @@ pub fn classify(text: &str, rc: i32, timed_out: bool, prompt: &str) -> String {
             r"(?i)429|1302|rate.?limit|too many requests|limit exceeded",
         ),
         (
+            "capacity",
+            r"(?i)\b(at capacity|overloaded|server is busy|503|try a different model|temporarily unavailable)\b",
+        ),
+        (
             "auth",
-            r"(?i)401|403|unauthorized|forbidden|not logged ?in|please log ?in|invalid (bearer|api.?key|token)|token expired|authentication|authorization grant.{0,40}(invalid|expired)|no credential configured",
+            r"(?i)\b(401|403|unauthorized|forbidden|not logged ?in|please log ?in|invalid (bearer|api.?key|token)|token expired|authentication|authorization grant.{0,40}(invalid|expired)|no credential configured)\b",
         ),
         (
             "transport",
@@ -374,9 +483,20 @@ pub(crate) fn cool_down(pool: &str, kind: &str, detail: &str) -> Result<()> {
     let default = match kind {
         "quota" if Regex::new(r"(?i)5[- ]hour|5h").unwrap().is_match(detail) => 300.0,
         "quota" => 60.0,
-        "auth" => 240.0,
+        "auth" => 10.0,
         "transport" => 5.0,
-        _ => return Ok(()),
+        _ => {
+            // An actual non-auth outcome breaks the consecutive-auth streak.
+            // Avoid creating a cooldown file for capacity or ordinary failures.
+            if load_state()["pools"][pool]["kind"] == "auth" {
+                state_update(|state| {
+                    if state["pools"][pool]["kind"] == "auth" {
+                        state["pools"].as_object_mut().unwrap().remove(pool);
+                    }
+                })?;
+            }
+            return Ok(());
+        }
     };
     let minutes = if kind == "quota" {
         retry_clock(detail)
@@ -386,13 +506,30 @@ pub(crate) fn cool_down(pool: &str, kind: &str, detail: &str) -> Result<()> {
                     .filter(|v| *v >= default)
                     .unwrap_or(default)
             })
+    } else if kind == "auth" {
+        // Ignore Retry-After on the first auth result: it has not been confirmed.
+        default
     } else {
         retry_after(detail).unwrap_or(default).max(default)
     };
-    state_update(
-        |state| state["pools"][pool] = json!({"until":now()+minutes*60.0,"kind":kind,"detail":short(detail,400),"since":Local::now().format("%Y-%m-%d %H:%M:%S").to_string()}),
-    )
+    state_update(|state| {
+        let auth_failures = if kind == "auth" {
+            if state["pools"][pool]["kind"] == "auth" {
+                state["pools"][pool]["auth_failures"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .saturating_add(1)
+            } else {
+                1
+            }
+        } else {
+            0
+        };
+        let minutes = if auth_failures >= 2 { 240.0 } else { minutes };
+        state["pools"][pool] = json!({"until":now()+minutes*60.0,"kind":kind,"auth_failures":auth_failures,"detail":short(detail,400),"since":Local::now().format("%Y-%m-%d %H:%M:%S").to_string()});
+    })
 }
+
 fn name(route: &Route, legacy: bool) -> &str {
     if legacy { &route.legacy_id } else { &route.id }
 }
@@ -1062,7 +1199,7 @@ pub(crate) async fn execute_cli_env(
         "cancelled".into()
     } else {
         classify(
-            &mask(&format!("{stderr}\n{stdout}"), &secrets),
+            &mask(&diagnostic_text(&r.id, &stdout, &stderr), &secrets),
             status.code().unwrap_or(1),
             cause.is_some(),
             &mask(prompt, &secrets),
@@ -1091,7 +1228,7 @@ pub(crate) async fn execute_cli_env(
             last.elapsed().as_secs_f64()
         )
     } else if kind != "ok" {
-        failure_reason(&stderr, &stdout, &kind, prompt)
+        failure_reason(&diagnostic_text(&r.id, &stdout, &stderr), "", &kind, prompt)
     } else {
         String::new()
     };
@@ -1316,9 +1453,7 @@ pub(crate) async fn run_one(
         let body = s(&result, "output").to_owned();
         ctx.annotate(&mut result, &body);
     }
-    if matches!(s(&result, "status"), "quota" | "auth" | "transport") {
-        cool_down(&r.pool, s(&result, "status"), s(&result, "error"))?;
-    }
+    cool_down(&r.pool, s(&result, "status"), s(&result, "error"))?;
     attempt.finish(s(&result, "status"), result.clone())?;
     if result["status"] == "ok" {
         let body = s(&result, "output");
@@ -1394,7 +1529,10 @@ pub(crate) async fn run_retry(
         options.set("timeout", remaining);
         let mut result = run_one(config, r, &options, prompt, ctx, legacy).await?;
         attempts.push(without_output(&result));
-        if result["status"] != "rate_limit" || r.api_alias.is_some() || index == retries {
+        if !matches!(s(&result, "status"), "rate_limit" | "capacity")
+            || r.api_alias.is_some()
+            || index == retries
+        {
             result["policySeconds"] = json!(start.elapsed().as_secs_f64());
             result["attempts"] = json!(attempts);
             return Ok(result);
@@ -1506,7 +1644,7 @@ pub async fn command(config: &Config, command: &str, args: &Args, legacy: bool) 
                 remaining.set("timeout", seconds);
                 v = run_retry(config, candidate, &remaining, &prompt, &ctx, legacy).await?;
                 history.push(without_output(&v));
-                if !matches!(s(&v, "status"), "quota" | "cooldown") {
+                if !matches!(s(&v, "status"), "quota" | "cooldown" | "capacity") {
                     break;
                 }
             }

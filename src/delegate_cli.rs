@@ -732,7 +732,12 @@ fn parse_stdout(vendor: Vendor, stdout: &str) -> Parsed {
         if vendor == Vendor::Grok && row["type"] == "result" {
             parsed.terminal = row["is_error"] == false && row["subtype"] == "success";
             if row["is_error"] == true {
-                parsed.error = Some("vendor CLI reported a failed terminal result".into());
+                let diagnostics = crate::review::diagnostic_text("grok-cli", stdout, "");
+                parsed.error = Some(if diagnostics.trim().is_empty() {
+                    "vendor CLI reported a failed terminal result".into()
+                } else {
+                    diagnostics
+                });
             }
             if let Some(result) = row["result"].as_str() {
                 parsed.body_received |= !result.is_empty();
@@ -1003,7 +1008,7 @@ pub async fn execute(
         "isolation_error".into()
     } else {
         crate::review::classify(
-            &scrub(&format!("{stderr}\n{stdout}")),
+            &scrub(&crate::review::diagnostic_text(&route.id, &stdout, &stderr)),
             exit.code().unwrap_or(1),
             reason.is_some(),
             prompt,
@@ -1019,7 +1024,12 @@ pub async fn execute(
         error = Some("Grok did not provide the actual session tool directory".into());
     }
     if status != "ok" && error.is_none() {
-        error = Some(scrub(&stderr.chars().take(1000).collect::<String>()));
+        error = Some(scrub(&crate::review::failure_reason(
+            &crate::review::diagnostic_text(&route.id, &stdout, &stderr),
+            "",
+            &status,
+            prompt,
+        )));
     }
     Ok(CliResult {
         output: scrub(&parsed.body),

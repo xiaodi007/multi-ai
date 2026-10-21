@@ -1155,3 +1155,92 @@ fn installed_kimi_rejects_injected_native_tool_and_exposes_only_broker() {
         "select_tools did not receive a policy rejection"
     );
 }
+
+#[test]
+fn restricted_grok_preserves_capacity_diagnostic_through_delegate() {
+    let (temp, home) = setup(
+        "grok 1.0.50 (c58f321264ba)",
+        r#"
+printf '%s\n' '{"type":"system","subtype":"init","tools":["search_tool","use_tool"],"mcp_servers":[{"name":"multi_ai"}]}'
+printf '%s\n' '{"role":"tool","content":"401 Unauthorized"}'
+printf '%s\n' '{"type":"result","is_error":true,"errors":["Selected model is overloaded"]}'
+exit 1
+"#,
+    );
+    fs::create_dir(temp.path().join("repo")).unwrap();
+    fs::write(temp.path().join("repo/source.txt"), "fictional fixture").unwrap();
+    fs::write(temp.path().join("task"), "Inspect source.txt").unwrap();
+    let output = command(&temp, &home)
+        .arg("pack")
+        .arg("--root")
+        .arg(temp.path().join("repo"))
+        .args(["--input", "source.txt", "--outdir"])
+        .arg(temp.path().join("packet"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let output = command(&temp, &home)
+        .args(["delegate", "investigate", "grok-cli", "--packet"])
+        .arg(temp.path().join("packet"))
+        .arg("--prompt-file")
+        .arg(temp.path().join("task"))
+        .arg("--outdir")
+        .arg(temp.path().join("out"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let output = command(&temp, &home)
+        .args(["stats", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stats: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stats["routes"][0]["failures"]["capacity"], 1, "{stats}");
+    assert!(!temp.path().join("state/review/state.json").exists());
+}
+
+#[test]
+fn restricted_grok_success_breaks_auth_streak_before_result_validation() {
+    let (temp, home) = setup(
+        "grok 1.0.50 (c58f321264ba)",
+        r#"
+printf '%s\n' '{"type":"system","subtype":"init","tools":["search_tool","use_tool"]}'
+printf '%s\n' '{"type":"result","is_error":false,"subtype":"success","result":"not a valid investigation report"}'
+"#,
+    );
+    fs::create_dir(temp.path().join("repo")).unwrap();
+    fs::write(temp.path().join("repo/source.txt"), "fictional fixture").unwrap();
+    fs::write(temp.path().join("task"), "Inspect source.txt").unwrap();
+    assert!(
+        command(&temp, &home)
+            .arg("pack")
+            .arg("--root")
+            .arg(temp.path().join("repo"))
+            .args(["--input", "source.txt", "--outdir"])
+            .arg(temp.path().join("packet"))
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::create_dir_all(temp.path().join("state/review")).unwrap();
+    fs::write(
+        temp.path().join("state/review/state.json"),
+        r#"{"pools":{"xai":{"until":1,"kind":"auth","auth_failures":1}}}"#,
+    )
+    .unwrap();
+    let output = command(&temp, &home)
+        .args(["delegate", "investigate", "grok-cli", "--packet"])
+        .arg(temp.path().join("packet"))
+        .arg("--prompt-file")
+        .arg(temp.path().join("task"))
+        .arg("--outdir")
+        .arg(temp.path().join("out"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success()); // Output schema validation still fails.
+    let state: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("state/review/state.json")).unwrap())
+            .unwrap();
+    assert!(state["pools"]["xai"].is_null(), "{state}");
+}

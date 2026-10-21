@@ -516,3 +516,116 @@ fn batch_sigterm_cancels_pool_queue_and_preserves_previous_reports() {
         );
     }
 }
+
+#[test]
+fn capacity_retries_then_uses_explicit_same_pool_fallback() {
+    let f = Fixture::new(&[
+        (
+            "busy",
+            "echo call >> calls\necho 'server is busy' >&2\nexit 1\n",
+            10,
+        ),
+        ("backup", "printf complete\n", 10),
+    ]);
+    let config = f.root.path().join("config/routes.json");
+    let mut routes: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    routes[1]["pool"] = json!("busy");
+    fs::write(config, serde_json::to_vec(&routes).unwrap()).unwrap();
+    let output = f
+        .cmd()
+        .args([
+            "run",
+            "busy",
+            "task",
+            "--fallback",
+            "backup",
+            "--out",
+            "answer.md",
+            "--rate-limit-retries",
+            "1",
+            "--retry-delay-ms",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.path().join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+    assert_eq!(
+        f.status()["route_attempts"][0]["attempts"][0]["status"],
+        "capacity"
+    );
+    assert!(!f.root.path().join("state/review/state.json").exists());
+}
+
+#[test]
+fn auth_cooldown_requires_consecutive_failures_and_reset_clears_history() {
+    let f = Fixture::new(&[("auth", "echo '401 Unauthorized' >&2\nexit 1\n", 10)]);
+    let invoke = || {
+        let out = f
+            .cmd()
+            .args([
+                "run",
+                "auth",
+                "task",
+                "--out",
+                "answer.md",
+                "--ignore-cooldown",
+            ])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert_eq!(f.status()["status"], "auth");
+        let state: Value = serde_json::from_slice(
+            &fs::read(f.root.path().join("state/review/state.json")).unwrap(),
+        )
+        .unwrap();
+        state["pools"]["auth"]["until"].as_f64().unwrap()
+            - std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64()
+    };
+    assert!((590.0..=600.0).contains(&invoke()));
+    assert!((14390.0..=14400.0).contains(&invoke()));
+    assert!(
+        f.cmd()
+            .args(["reset", "auth"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!((590.0..=600.0).contains(&invoke()));
+    fs::write(f.root.path().join("auth.sh"), "printf complete\n").unwrap();
+    assert!(
+        f.cmd()
+            .args([
+                "run",
+                "auth",
+                "task",
+                "--out",
+                "answer.md",
+                "--ignore-cooldown"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::write(
+        f.root.path().join("auth.sh"),
+        "echo '401 Unauthorized' >&2\nexit 1\n",
+    )
+    .unwrap();
+    assert!((590.0..=600.0).contains(&invoke()));
+}

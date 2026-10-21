@@ -389,7 +389,7 @@ pub fn collect(state: &Path, args: &Args) -> Result<Value> {
         let implementation = task_type.as_deref() == Some("implement");
         let sufficient = c.calls >= 5 && if implementation {c.outcome_samples >= 5 && c.rework_item_samples >= 5} else {c.verified >= 5 && c.canary_samples >= 5};
         let failed: u64 = c.failures.values().sum();
-        let rates: BTreeMap<_,_> = ["quota","rate_limit","timeout"].into_iter().map(|s|(s,ratio(*c.failures.get(s).unwrap_or(&0) as f64,c.calls))).collect();
+        let rates: BTreeMap<_,_> = ["quota","rate_limit","capacity","timeout"].into_iter().map(|s|(s,ratio(*c.failures.get(s).unwrap_or(&0) as f64,c.calls))).collect();
         let mut revisions: Vec<_> = c.revisions.into_iter().collect(); revisions.sort();
         let mut row = json!({"route":route,"task_type":task_type,"model":model,"sample_count":c.calls,"verified_samples":c.verified,
             "assessment":if sufficient && (implementation || (precision.is_some() && recall.is_some())){"可比较"}else{"样本不足"},
@@ -441,7 +441,7 @@ pub fn command(args: &Args) -> Result<i32> {
             .any(|c| c["task_type"] != "implement")
         {
             runtime::stdout_line(format_args!(
-                "ROUTE\tTASK TYPE\tN\tPRECISION\tCANARY\tMEDIAN s\tP90 s\tFAIL RATE (quota/rate/timeout)\tEXT s/accepted\tHOST min/accepted\tASSESSMENT"
+                "ROUTE\tTASK TYPE\tN\tPRECISION\tCANARY\tMEDIAN s\tP90 s\tFAIL RATE (quota/rate/capacity/timeout)\tEXT s/accepted\tHOST min/accepted\tASSESSMENT"
             ))?;
         }
         let metric = |v: &Value| v.as_f64().map_or_else(|| "-".into(), |n| format!("{n:.3}"));
@@ -468,7 +468,7 @@ pub fn command(args: &Args) -> Result<i32> {
                 continue;
             }
             runtime::stdout_line(format_args!(
-                "{}\t{}\t{}\t{}\t{}/{}\t{}\t{}\t{} ({}/{}/{})\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}/{}\t{}\t{}\t{} ({}/{}/{}/{})\t{}\t{}\t{}",
                 row["route"].as_str().unwrap(),
                 row["task_type"].as_str().unwrap_or("-"),
                 row["sample_count"],
@@ -480,6 +480,7 @@ pub fn command(args: &Args) -> Result<i32> {
                 metric(&row["failure_rate"]),
                 metric(&row["failure_rates"]["quota"]),
                 metric(&row["failure_rates"]["rate_limit"]),
+                metric(&row["failure_rates"]["capacity"]),
                 metric(&row["failure_rates"]["timeout"]),
                 metric(&row["external_seconds_per_accepted"]),
                 metric(&row["host_screen_minutes_per_accepted"]),
@@ -595,7 +596,7 @@ fn recommendation(
         } else {
             None
         };
-        candidates.push(json!({"route":route.id,"pool":route.pool,"mean_rework_items":cell.and_then(|c|c["mean_rework_items"].as_f64()),"score":score,"reason":if score.is_some(){if task == "implement" {"合入率优先、返工条数次序"} else {"精度×召回"}}else{"样本不足或模型/CLI身份已变化"},"jobs":0,"sample_count":cell.and_then(|c|c["sample_count"].as_u64()).unwrap_or(0),"weight":0.0}));
+        candidates.push(json!({"route":route.id,"pool":route.pool,"mean_rework_items":cell.and_then(|c|c["mean_rework_items"].as_f64()),"score":score,"failure_rate":cell.map(|c|c["failure_rate"].clone()),"failure_rates":cell.map(|c|c["failure_rates"].clone()),"reason":if score.is_some(){if task == "implement" {"合入率优先、返工条数次序"} else {"精度×召回"}}else{"样本不足或模型/CLI身份已变化"},"jobs":0,"sample_count":cell.and_then(|c|c["sample_count"].as_u64()).unwrap_or(0),"weight":0.0}));
     }
     if candidates.is_empty() {
         bail!("no eligible routes outside cooldown");

@@ -770,6 +770,8 @@ async fn execute(
         attempt.update(metadata.clone())?;
         match execution {
             Ok((raw, _)) => {
+                // Authentication succeeded even if later report validation fails.
+                review::cool_down(&target.pool, "ok", "")?;
                 attempt.write("answer.json.txt", raw.as_bytes())?;
                 let structured = match parse_result(&raw, packet) {
                     Ok(value) => value,

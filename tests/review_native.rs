@@ -1006,3 +1006,91 @@ fn kimi_fixed_tail_reports_matching_quota_line_in_status() {
     assert_eq!(status["error"], reason);
     assert!(!out.exists());
 }
+
+#[test]
+fn auth_tokens_require_boundaries() {
+    for text in ["x401y", "1403", "unforbidden", "authentication_notes"] {
+        assert_eq!(classify(text, 1, false, ""), "error", "{text}");
+    }
+    for text in ["HTTP 401", "403 Forbidden", "authentication failed"] {
+        assert_eq!(classify(text, 1, false, ""), "auth", "{text}");
+    }
+}
+
+#[test]
+fn capacity_diagnostics_have_distinct_status() {
+    for text in [
+        "at capacity",
+        "overloaded",
+        "server is busy",
+        "HTTP 503",
+        "try a different model",
+        "temporarily unavailable",
+    ] {
+        assert_eq!(classify(text, 1, false, ""), "capacity", "{text}");
+    }
+}
+
+#[test]
+fn vendor_diagnostics_exclude_tools_and_assistant_text() {
+    for (id, stdout, expected) in [
+        (
+            "other",
+            "{\"type\":\"unknown\",\"message\":{\"role\":\"tool\",\"content\":\"401 Unauthorized\"},\"error\":{\"message\":\"ordinary failure\"}}",
+            "error",
+        ),
+        (
+            "other",
+            "{\"type\":\"vendor.failure\",\"message\":\"401 Unauthorized\"}",
+            "auth",
+        ),
+        (
+            "codex-cli",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"aggregated_output\":\"<tool_result>\"}}\n{\"type\":\"error\",\"message\":\"401 Unauthorized\"}",
+            "auth",
+        ),
+        (
+            "codex-cli",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"401 Unauthorized\"}}\n{\"type\":\"turn.failed\",\"error\":{\"message\":\"ordinary failure\"}}",
+            "error",
+        ),
+        (
+            "grok-cli",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"401 Unauthorized\"}]}}\n{\"type\":\"result\",\"is_error\":true,\"errors\":[\"overloaded\"]}",
+            "capacity",
+        ),
+        (
+            "kimi-k3-cli",
+            "{\"role\":\"tool\",\"content\":\"401 Unauthorized\"}\n{\"type\":\"error\",\"error\":{\"message\":\"ordinary failure\"}}",
+            "error",
+        ),
+        (
+            "other",
+            "<tool_result>\n{\"type\":\"error\",\"message\":\"401 Unauthorized\"}\n</tool_result>\nordinary failure",
+            "error",
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let p = script(
+            temp.path(),
+            "fake.sh",
+            &format!("cat <<'FIXTURE'\n{stdout}\nFIXTURE\nexit 1\n"),
+        );
+        let f = Fixture::new(json!([make_route(id, "pool", 1, &p, "stdout")]));
+        failure(&f.run(&[
+            "run",
+            id,
+            "task",
+            "--out",
+            "answer.md",
+            "--rate-limit-retries",
+            "0",
+        ]));
+        let result = value(&f.cwd.join("answer.md.status.json"));
+        assert_eq!(result["status"], expected, "{id}");
+        assert!(
+            expected == "auth" || !result["error"].as_str().unwrap().contains("401"),
+            "{id}: {result}"
+        );
+    }
+}

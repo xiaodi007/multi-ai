@@ -752,3 +752,55 @@ fn scorecard_separates_recorded_models_and_counts_execution_failure_under_bounda
     assert_eq!(cells[1]["failure_rate"], 0.5);
     assert_eq!(cells[1]["attributed_boundary_count"], 1);
 }
+
+#[test]
+fn scorecard_distinguishes_capacity_from_rate_limit() {
+    let t = tempfile::tempdir().unwrap();
+    historical(
+        t.path(),
+        "fixture",
+        &[
+            json!({"attempt_id":"busy","route":"good","task_type":"review","status":"capacity","seconds":1}),
+            json!({"attempt_id":"rate","route":"good","task_type":"review","status":"rate_limit","seconds":1}),
+        ],
+    );
+    let report = value(command(t.path(), &["scorecard", "--json"]));
+    let cell = &report["cells"][0];
+    assert_eq!(cell["failures"]["capacity"], 1);
+    assert_eq!(cell["failure_rates"]["capacity"], 0.5);
+    assert_eq!(cell["failure_rates"]["rate_limit"], 0.5);
+}
+
+#[test]
+fn recommend_exposes_capacity_failure_rate_for_current_identity() {
+    let t = tempfile::tempdir().unwrap();
+    setup(t.path());
+    fs::write(t.path().join("fake.sh"), "echo 'overloaded' >&2\nexit 1\n").unwrap();
+    let out = command(
+        t.path(),
+        &[
+            "run",
+            "good",
+            "task",
+            "--task-type",
+            "triage",
+            "--out",
+            "answer.md",
+            "--rate-limit-retries",
+            "0",
+        ],
+    );
+    assert!(!out.status.success());
+    let report = value(command(
+        t.path(),
+        &[
+            "recommend",
+            "--task-type",
+            "triage",
+            "--only",
+            "good",
+            "--json",
+        ],
+    ));
+    assert_eq!(report["routes"][0]["failure_rates"]["capacity"], 1.0);
+}

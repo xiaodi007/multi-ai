@@ -315,7 +315,7 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
                     result = review::run_retry(config, route, &remaining, &prompt, &child, false)
                         .await?;
                     history.push(review::without_output(&result));
-                    if !matches!(result["status"].as_str(), Some("quota" | "cooldown")) {
+                    if !matches!(result["status"].as_str(), Some("quota" | "cooldown" | "capacity")) {
                         break;
                     }
                 }

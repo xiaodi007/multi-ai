@@ -746,16 +746,11 @@ async fn execute(
         }
     }
     // Preserve quota/auth/transport handling even if post-checks override the final status.
-    if matches!(
-        result["status"].as_str(),
-        Some("quota" | "auth" | "transport")
-    ) {
-        review::cool_down(
-            &route.pool,
-            result["status"].as_str().unwrap(),
-            result["error"].as_str().unwrap_or(""),
-        )?;
-    }
+    review::cool_down(
+        &route.pool,
+        result["status"].as_str().unwrap(),
+        result["error"].as_str().unwrap_or(""),
+    )?;
     result["execution_status"] = result["status"].clone();
     result["execution_error"] = result["error"].clone();
     match after {

@@ -947,3 +947,61 @@ fn nested_worktree_changes_warn_and_linked_claude_configuration_remains_protecte
     let status = f.assert_boundary(&out, &["linked-skills/custom/keep"]);
     assert_eq!(status["boundary_buckets"]["claude_config"]["count"], 1);
 }
+
+// Minimal replay: no repository documents or real credentials are retained.
+fn replay_failure(stdout: &str, stderr: &str, expected: &str) -> Fixture {
+    let f = Fixture::new();
+    fs::write(f.path("stdout.fixture"), stdout).unwrap();
+    fs::write(f.path("stderr.fixture"), stderr).unwrap();
+    f.fake("cat \"$FAKE_ROOT/stdout.fixture\"\ncat \"$FAKE_ROOT/stderr.fixture\" >&2\nexit 1\n");
+    f.preserve_summary();
+    let output = f.run(&[]);
+    assert!(!output.status.success());
+    assert_eq!(f.status()["execution_status"], expected);
+    assert_eq!(
+        fs::read_to_string(f.path("summary.md")).unwrap(),
+        "previous complete summary"
+    );
+    f
+}
+
+#[test]
+fn replay_capacity_ignores_forbidden_tool_output_without_cooldown() {
+    let f = replay_failure(
+        include_str!("fixtures/codex-capacity-stdout.jsonl"),
+        include_str!("fixtures/codex-capacity-stderr.txt"),
+        "capacity",
+    );
+    assert!(!f.path("state/review/state.json").exists());
+    let output = f.cmd().args(["stats", "--json"]).output().unwrap();
+    assert!(output.status.success());
+    let stats: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stats["routes"][0]["failures"]["capacity"], 1);
+}
+
+#[test]
+fn replay_plain_error_ignores_unauthorized_tool_output() {
+    let f = replay_failure(
+        "{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"aggregated_output\":\"401 Unauthorized\"}}\n{\"type\":\"error\",\"message\":\"ordinary failure\"}\n",
+        "",
+        "error",
+    );
+    assert!(!f.path("state/review/state.json").exists());
+}
+
+#[test]
+fn replay_auth_error_still_auth_with_short_first_cooldown() {
+    let f = replay_failure(
+        "{\"type\":\"error\",\"message\":\"401 Unauthorized\"}\n",
+        "",
+        "auth",
+    );
+    let state: Value =
+        serde_json::from_slice(&fs::read(f.path("state/review/state.json")).unwrap()).unwrap();
+    let remaining = state["pools"]["openai"]["until"].as_f64().unwrap()
+        - SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+    assert!((590.0..=600.0).contains(&remaining), "{remaining}");
+}

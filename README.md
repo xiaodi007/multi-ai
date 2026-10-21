@@ -193,6 +193,29 @@ multi-ai stats --json
 
 `--resume` 继续使用完整身份和正文哈希校验；成功备选也能直接恢复，未知模型身份仍重新执行。非 Git 任务用清单的 `source_id` 或全局 `--source-id` 标识真实材料版本。修改输入、模型、代码或策略身份后会重新请求，不保证“只看 id 跳过”。失败不替换上一份完整正文，须结合本轮 status 阅读。
 
+### 失败分类与冷却
+
+CLI 分类只使用诊断信道：Codex 的 stdout 只取 `error.message` 和 `turn.failed.error.message`，加上 stderr；`item.*`（包括工具输出和模型正文）不参与。Grok/Kimi 等结构化流只取错误字段；无法识别的输出保留兼容回退，但先剔除工具结果块。API 继续使用响应错误体及 HTTP 状态。
+
+| 分类 | 诊断示例 | 处理 |
+|---|---|---|
+| `quota` | quota exhausted、usage limit | 额度池冷却，按原规则换备选；5 小时用量错误默认冷却 5 小时 |
+| `rate_limit` | 429、1302、too many requests | 预算内指数退避重试，不写池冷却 |
+| `capacity` | at capacity、overloaded、server is busy、503、try a different model、temporarily unavailable | CLI 复用限流退避；run/batch 重试耗尽后可使用显式备选（含同池），不写池冷却 |
+| `auth` | 独立的 401、403、Unauthorized、Forbidden、authentication | 首次冷却 10 分钟；同池连续第二次及以后冷却 240 分钟；实际非 auth 执行结果或手动 reset 清零连续次数 |
+| `transport` | connection reset、network、EOF | 默认冷却 5 分钟 |
+| `timeout` / `error` | 超时 / 其它失败（含输入过长） | 独立记录，不触发 auth 冷却 |
+
+`capacity` 在 `stats --json` 的 `failures`、`scorecard --json` 和 `recommend --json` 的 `failure_rates` 中独立计数／展示；历史记录保留原分类。API 的 HTTP 分类和重试规则保持原语义。review/verify 席位调度规则不变。
+
+误冷却或修复登录后，可用已有入口离线解除（不会调用模型）：
+
+```sh
+multi-ai status
+multi-ai reset openai     # 清指定额度池及连续 auth 次数
+multi-ai reset --all      # 清全部额度池冷却
+```
+
 `stats` 只读本地运行记录，不加载 API 配置或凭据、不联网。它按记录中的实际通路汇总真实适配调用的次数、成功率、耗时中位数、P90、失败类型、输入与最终输出字节；缓存命中和未调用适配器的跳过记录单列。中位数对偶数样本取两数平均，P90 取 nearest rank（向上取整第 90% 位）；失败耗时也在样本内。历史记录缺字段会留空并显示有效样本数，不按当前配置猜历史模型。`--state-dir DIR` 可只读其他状态目录；丢失的进度目录会尽量用 manifest 回补，并报告缺失和损坏记录数。统计不证明答案正确或节省 token。
 
 ## 受控实施
@@ -255,7 +278,7 @@ TSV 首行为 `id<Tab>accepted<Tab>false_positive<Tab>uncertain<Tab>evidence`，
 
 | 指标 | 口径 |
 |---|---|
-| 样本数、失败率 | 真实适配调用；缓存、冷却跳过、未启动和进行中不计。失败细分 quota、rate_limit、timeout；失败也计耗时。 |
+| 样本数、失败率 | 真实适配调用；缓存、冷却跳过、未启动和进行中不计。失败细分 quota、rate_limit、capacity、timeout；失败也计耗时。 |
 | 精度 | accepted / (accepted + false_positive)；只用两个字段均已知的报告；重复和待定不进分母。 |
 | 金丝雀召回、漏报率 | 命中 / 已知答案总数；漏报率 = 1 − 召回。缓存不重复累计。 |
 | 中位数、P90 | 单位秒；偶数中位取平均，P90 用 nearest rank。JSON 比率为 0～1。 |
