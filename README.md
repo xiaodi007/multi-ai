@@ -350,3 +350,23 @@ multi-ai scorecard --task-type implement --json
 钩子按数组顺序在 cwd 中执行，cmd 为可执行文件与参数数组，不经 shell 展开；需要 shell 时显式指定。钩子的 stdout/stderr 均发往主命令 stderr，保持报告 stdout 格式，stdin 关闭。钩子环境带 `MULTI_AI_ALLOW_DIRTY`（主命令带 `--allow-dirty` 时为 1，否则为 0），供预检放行未提交修改。`required: true` 非零退出或无法启动即拒绝派发并说明原因，false（默认）仅警告并继续。配置损坏或无法读取会拒绝派发。钩子是工作树提供的可执行配置，使用前应检查其内容；二进制不包含业务项目路径。
 
 本机切换：先安装新版二进制，再升级 skill；若旧 runner 曾私改记账或预检，升级会保留用户修改并给出合并指南。此时应将本机 `run.sh` 恢复为上游纯转发模板，否则重复记账；原来隐式发现的项目预检需迁移到目标工作树 `.multi-ai/hooks.json`（需要传 cwd 等参数时在 cmd 中明确填写）。核对纯转发 runner 后，用临时 `AI_LEDGER_FILE` 执行离线命令验证仅一对事件。本次源码修改不操作本机安装文件。
+
+## 从 Git 建议实施 outcome
+
+```sh
+multi-ai outcome suggest --run RUN --report ATTEMPT --into main
+multi-ai outcome suggest --all --into refs/heads/main --json
+multi-ai outcome suggest --all --into main --apply
+```
+
+仅处理 `delegate implement codex-cli` 的记录；没有已登记完整报告的 attempt 只返回 `unknown`。默认只读，无需加载凭据或调用模型。扫描使用 `MULTI_AI_STATE_DIR`（默认状态目录），每个仓库分别解析 `--into`；不会 fetch。输出包含建议、运行前 HEAD、目标 REF 解析出的 commit、分支 tip、相关提交和匹配文件。已有绑定相同报告哈希的 outcome 跳过；`--apply` 才经现有 feedback 校验与追加路径写入 `merged` / `discarded`，source 固定为 agent，证据注明 git 推断、REF 和 commit。未知数量和返工字段留空，`unknown` 永不写入；重复或并发应用会在反馈锁内再次检查，避免重复录入。
+
+判据按以下顺序执行，可用输出的提交号与文件列表复核：
+
+- 读取 manifest 内该 attempt 登记的 status（`reports[].result`），使用 cwd、`git_before.branch/head`、`git_after.head` 和 `changed_files`。这份 status 不受之后复用输出路径影响。完整正文须匹配登记哈希，运行中 HEAD 变化、无改动文件均为 `unknown`。
+- `discarded` 只有一种情形：工作树与 REF 可读、运行时本地分支已不存在，且所有 attempt 文件均未出现在 `运行前 HEAD..REF` 的净差异中。分支已删但有 attempt 文件到达 REF（合入后删分支、复用工作树）为 `unknown`。分支仍在时，必须仍从运行前 HEAD 派生。
+- `merged`：运行前 HEAD 到当前分支 tip 恰有一次提交，且提交者时间在运行开始时或之后；该 tip 是 REF 的祖先，提交只涉及 attempt 文件，且 attempt 文件至少一个出现在 `运行前 HEAD..REF` 的净差异中。这允许宿主在运行后提交。多次提交或夹带其它文件均保守为 `unknown`。
+- 分支仍在、运行后尚无提交时为 `unknown`：宿主可能仍在复核未提交的改动，不判弃用。为处理 Git 秒精度，开始所在秒也视为运行后的候选提交。
+- 其它情形给 `unknown`，保留可得证据；绝不猜 `merged-after-rework`。无法区分返工时需宿主自行判断并用 `feedback` 录入。
+
+这些是建议，不是代码内容等价性证明：同一文件中其它人的修改也会命中文件判据，单次提交内的返工无法识别；squash/cherry-pick、分支重建、改写历史、提交时间不可信、修改后又恢复都会降低判定能力。不会用 reflog 或联网找回历史。旧 status 没有分支字段、detached HEAD、工作树/仓库已删除、Git 不可用、REF 无效或报告损坏时降级为 `unknown`。本次新增分支记录，不按当前分支冒认旧运行身份。此功能没有强制录分门禁。

@@ -234,6 +234,9 @@ fn public_dirty_worktree_refuses_before_start_and_records_head() {
 fn public_fake_codex_receives_native_workspace_write_arguments_and_changes_cwd() {
     for network in [false, true] {
         let f = Fixture::new();
+        let branch = String::from_utf8(f.git(&["symbolic-ref", "--short", "HEAD"]).stdout).unwrap();
+        let branch = branch.trim();
+        f.git(&["tag", branch]);
         let extra = if network {
             vec!["--network", "--timeout", "10"]
         } else {
@@ -249,6 +252,8 @@ fn public_fake_codex_receives_native_workspace_write_arguments_and_changes_cwd()
             json!(["changed.txt", "tracked.txt"])
         );
         assert_eq!(status["git_before"]["head"], status["git_after"]["head"]);
+        assert_eq!(status["git_before"]["branch"], branch);
+        assert_eq!(status["git_after"]["branch"], branch);
         assert_eq!(status["git_before"]["status_porcelain"], "");
         assert!(
             status["git_after"]["status_porcelain"]

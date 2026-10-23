@@ -20,6 +20,7 @@ impl Args {
             "no-quota",
             "dry-run",
             "all",
+            "apply",
             "legacy",
             "stream",
             "no-stream",

@@ -29,6 +29,7 @@ mod tests;
 #[derive(Serialize)]
 struct GitSnapshot {
     head: Option<String>,
+    branch: Option<String>,
     status_short: String,
     status_porcelain: String,
     dirty_files: Vec<String>,
@@ -36,9 +37,11 @@ struct GitSnapshot {
 }
 impl GitSnapshot {
     fn summary(&self) -> Result<Value> {
-        Ok(json!({"head":self.head,"status_short":self.status_short,
+        Ok(
+            json!({"head":self.head,"branch":self.branch,"status_short":self.status_short,
             "status_porcelain":self.status_porcelain,"dirty_files":self.dirty_files,
-            "files_sha256":runtime::sha256(&serde_json::to_vec(&self.files)?)}))
+            "files_sha256":runtime::sha256(&serde_json::to_vec(&self.files)?)}),
+        )
     }
 }
 
@@ -138,8 +141,13 @@ fn snapshot(cwd: &Path) -> Result<GitSnapshot> {
         };
         files.insert(name, value);
     }
+    let branch = git(cwd, &["symbolic-ref", "--quiet", "HEAD"])
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .and_then(|s| s.trim().strip_prefix("refs/heads/").map(str::to_owned));
     Ok(GitSnapshot {
         head,
+        branch,
         status_short,
         status_porcelain,
         dirty_files: dirty_files.into_iter().collect(),

@@ -109,6 +109,7 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
         "reset" => &["all"],
         "routes" => &[],
         "doctor" => &["live", "only", "timeout"],
+        "outcome" => &["run", "report", "into", "all", "apply"],
         "feedback" => &[
             "batch",
             "from",
@@ -205,6 +206,10 @@ fn help_app() -> Command {
             "feedback",
             "按报告代录反馈；--run ID --report ID --evidence TEXT",
         ),
+        (
+            "outcome",
+            "git 推断实施 outcome；suggest --run RUN --report ATTEMPT --into REF [--all] [--apply]",
+        ),
         ("probe", "显式探测通路并调用模型"),
         ("usage", "查看已有账户额度"),
         ("status", "查看冷却，不代表已经验证健康"),
@@ -248,6 +253,10 @@ fn print_help(topic: Option<&str>, legacy: Option<&str>) -> Result<()> {
     if topic == Some("batch") {
         println!(
             "multi-ai batch --jobs jobs.json --outdir results [--pool-limit POOL=N] [--timeout SECONDS] [--resume]\n清单为 {{\"jobs\":[{{\"id\":\"one\",\"prompt_file\":\"task.md\",\"cwd\":\"repo\",\"route\":\"grok-cli\",\"fallback\":[]}}],\"pool_limits\":{{\"xai\":2}}}}；路径相对清单，默认每池并发2。\n每项独立 .md / .md.status.json；仅复用身份与正文哈希一致的完整报告。task_type 为自由字符串；canaries 为 [{{\"match\":\"src/a.rs:10\",\"expect\":\"真问题\"}}]；route:auto 按成绩分配，可用 --only/--exclude 收窄。"
+        );
+    } else if topic == Some("outcome") {
+        println!(
+            "multi-ai outcome suggest --run RUN --report ATTEMPT --into REF [--json] [--apply]\nmulti-ai outcome suggest --all --into REF [--json] [--apply]\n只读 git 建议；--apply 仅追加确定的 merged/discarded，跳过已有 outcome。unknown 永不写入，不推断 merged-after-rework；旧记录缺分支时 unknown。"
         );
     } else if topic == Some("scorecard") || topic == Some("recommend") {
         println!(
@@ -455,6 +464,9 @@ async fn main_entry_inner(argv: Vec<String>) -> Result<i32> {
     }
     if command == "install-config" {
         return install_config(&args);
+    }
+    if command == "outcome" {
+        return crate::outcome::command(&args);
     }
     if command == "feedback" {
         return runtime::feedback_command(&args);

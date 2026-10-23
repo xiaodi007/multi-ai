@@ -636,7 +636,7 @@ impl Attempt {
         self.event(status, json!({}))
     }
 }
-fn safe_id(id: &str) -> bool {
+pub(crate) fn safe_id(id: &str) -> bool {
     !id.is_empty()
         && id != "."
         && id != ".."
@@ -875,14 +875,29 @@ fn prepare_feedback(args: &Args) -> Result<(PathBuf, Value)> {
 fn append_feedback(directory: &Path, event: &Value) -> Result<()> {
     let file = directory.join("feedback.jsonl");
     let _lock = OutputLock::acquire(&[(file.clone(), true)])?;
+    append_feedback_locked(&file, event)
+}
+fn append_feedback_locked(file: &Path, event: &Value) -> Result<()> {
     let mut out = OpenOptions::new()
         .append(true)
         .create(true)
         .mode(0o600)
-        .open(&file)?;
+        .open(file)?;
     out.write_all(format!("{}\n", serde_json::to_string(event)?).as_bytes())?;
     out.sync_all()?;
     Ok(())
+}
+// Outcome application shares feedback validation and append semantics; recheck under
+// the same feedback lock so repeated/concurrent suggestions cannot duplicate outcomes.
+pub(crate) fn apply_outcome(args: &Args) -> Result<bool> {
+    let (directory, event) = prepare_feedback(args)?;
+    let file = directory.join("feedback.jsonl");
+    let _lock = OutputLock::acquire(&[(file.clone(), true)])?;
+    if crate::outcome::has_outcome(&directory, &event["attempt_id"], &event["report_sha256"])? {
+        return Ok(false);
+    }
+    append_feedback_locked(&file, &event)?;
+    Ok(true)
 }
 pub fn feedback_command(args: &Args) -> Result<i32> {
     if args.has("batch") || args.has("from") {

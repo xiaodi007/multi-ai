@@ -15,3 +15,5 @@ pub mod review;
 pub mod runtime;
 pub mod scorecard;
 pub mod stats;
+
+pub mod outcome;
