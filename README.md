@@ -325,3 +325,28 @@ multi-ai scorecard --task-type implement --json
 ```
 
 判据：只处理没有 attribution 的旧 boundary_violation；response.status=ok、response.complete=true、response.exitCode=0、summary_published=true、Git 检查正常，且当前发布摘要以完整非空 last-message 正文结尾。校验 run/attempt、manifest、status 和 artifacts 路径身份。宿主显式应用才将旧未归因变化重判为警告、缺失类型补 implement，并登记绑定 SHA-256 的摘要；不推断采纳、返工或历史模型。保留原诊断正文与 `summary_kind=diagnostic`，原始元数据备份到 artifacts/legacy-before-reclassification.json，完整旧越界路径也在该备份。所有记录先预检，文件逐个原子替换，manifest 最后发布；进程中断需从备份人工恢复后重试，不在有并发写入时执行。同一 run 一次仅修一个 attempt。无法满足完整性判据的记录拒绝重判。
+
+## 跨会话账本与派发 pre-hook
+
+账本与 pre-hook 已内置于 Rust 二进制；`integration/skills/multi-ai/scripts/run.sh` 保持纯转发。`delegate`、`batch`、`review`、`run`、`verify` 各追加一对 start/finish JSONL 事件，参数错误和钩子拒绝也会收尾。账本默认 `~/.local/state/ai-ledger/events.jsonl`，`AI_LEDGER_FILE` 可覆盖；显式空串或 `off` 关闭。追加失败仅向 stderr 警告，不改变命令退出码。强杀、断电等未完成调用会留下 start，旧读者仍可用 host/pid 判 running/lost。
+
+`--card CARD` 优先于 `AI_LEDGER_CARD`，均未设置时省略 card，不要求必填。`task_type` 优先取 `--task-type`；否则 `delegate implement`、`review`、`verify` 分别推断为 implement、review、verify，其余为 null。账本与报告级 feedback.jsonl 分工独立。
+
+| 字段 | 兼容约定 |
+|---|---|
+| v、at、id、event | 保留：版本 1、UTC 时间、每次调用唯一且 start/finish 共用的 id、事件类型 |
+| actor、what、cwd、out | start 保留：multi-ai、命令及位置参数、目标目录、输出路径；finish 继续带 out |
+| pid、host、branch、head | start 保留；finish 重新读取 head；Git 信息不可得时为空串 |
+| card | 旧字段，改为可选；参数优先于环境变量，无来源则省略 |
+| exit | finish 保留，等于命令最终退出码 |
+| task_type | start 新增，可空；旧读者忽略此字段即可 |
+
+只对 `delegate implement`，运行前读取目标 `--cwd`（未指定时当前目录）的 `.multi-ai/hooks.json`；文件不存在则静默跳过。示例：
+
+```json
+{"pre_delegate_implement": [{"cmd": ["node", "scripts/collaboration/dispatch-preflight.mjs"], "required": true}]}
+```
+
+钩子按数组顺序在 cwd 中执行，cmd 为可执行文件与参数数组，不经 shell 展开；需要 shell 时显式指定。钩子的 stdout/stderr 均发往主命令 stderr，保持报告 stdout 格式，stdin 关闭。钩子环境带 `MULTI_AI_ALLOW_DIRTY`（主命令带 `--allow-dirty` 时为 1，否则为 0），供预检放行未提交修改。`required: true` 非零退出或无法启动即拒绝派发并说明原因，false（默认）仅警告并继续。配置损坏或无法读取会拒绝派发。钩子是工作树提供的可执行配置，使用前应检查其内容；二进制不包含业务项目路径。
+
+本机切换：先安装新版二进制，再升级 skill；若旧 runner 曾私改记账或预检，升级会保留用户修改并给出合并指南。此时应将本机 `run.sh` 恢复为上游纯转发模板，否则重复记账；原来隐式发现的项目预检需迁移到目标工作树 `.multi-ai/hooks.json`（需要传 cwd 等参数时在 cmd 中明确填写）。核对纯转发 runner 后，用临时 `AI_LEDGER_FILE` 执行离线命令验证仅一对事件。本次源码修改不操作本机安装文件。

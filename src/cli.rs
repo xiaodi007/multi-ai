@@ -82,6 +82,7 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
             "no-quota",
         ],
         "verify" => &[
+            "task-type",
             "rate-limit-retries",
             "retry-delay-ms",
             "findings",
@@ -156,7 +157,10 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
         return Err(UsageError("--network is a flag and does not accept a value".into()).into());
     }
     for key in args.values.keys().chain(args.flags.iter()) {
-        if !common.contains(&key.as_str()) && !specific.contains(&key.as_str()) {
+        if !(common.contains(&key.as_str())
+            || specific.contains(&key.as_str())
+            || key == "card" && crate::ledger::tracked(command))
+        {
             return Err(UsageError(format!("Unknown argument --{key} for {command}")).into());
         }
     }
@@ -262,7 +266,7 @@ fn print_help(topic: Option<&str>, legacy: Option<&str>) -> Result<()> {
         );
     } else {
         println!(
-            "示例：\n  multi-ai routes --json\n  multi-ai run kimi-k3-cli --prompt-file evidence.md --cwd /path/to/repo --out review.md\n  multi-ai review --input evidence.md --text-ready --outdir reviews --seats 2\n  multi-ai verify --findings review.md --cwd /path/to/repo --out verify.md\n  multi-ai text glm --input evidence.md --out answer.md\n\nrun/review/verify：--timeout、--headers-timeout、--idle-timeout 单位秒。\n--only ROUTE… / --exclude ROUTE…；--no-metered；--agentic；--resume。\nAPI只读实际附带的正文，不能读取cwd路径；客户原件仅在明确授权范围使用。\n反馈：multi-ai feedback --run UUID --report ATTEMPT-ID --accepted N --evidence TEXT\n  [--false-positive N --duplicate N --uncertain N --screen-min N --rework-min N]\n实施反馈：[--outcome merged|merged-after-rework|discarded --rework-items N --rework-rounds N --defect-tags tag1,tag2]\n批量反馈：multi-ai feedback --batch OUTDIR --from verdicts.tsv（id accepted false_positive uncertain evidence；Tab分隔；可选 screen_min rework_min outcome rework_items rework_rounds defect_tags）\nrun/review/batch/delegate 接受 --task-type X；run --canary-file FILE 接收本地已知答案 JSON 数组，不发送给模型。\n默认source=agent；人工决定需 --source human --human-confirmed 与明确用户证据。\n顺序复用自动保留历史；同输出并发立即失败；旧引擎缓存失配可能重新请求。\nreview --dry-run 保留额度采集行为；需要纯离线检查使用 routes 或 doctor。"
+            "示例：\n  multi-ai routes --json\n  multi-ai run kimi-k3-cli --prompt-file evidence.md --cwd /path/to/repo --out review.md\n  multi-ai review --input evidence.md --text-ready --outdir reviews --seats 2\n  multi-ai verify --findings review.md --cwd /path/to/repo --out verify.md\n  multi-ai text glm --input evidence.md --out answer.md\n\nrun/review/verify：--timeout、--headers-timeout、--idle-timeout 单位秒。\n--only ROUTE… / --exclude ROUTE…；--no-metered；--agentic；--resume。\nAPI只读实际附带的正文，不能读取cwd路径；客户原件仅在明确授权范围使用。\n反馈：multi-ai feedback --run UUID --report ATTEMPT-ID --accepted N --evidence TEXT\n  [--false-positive N --duplicate N --uncertain N --screen-min N --rework-min N]\n实施反馈：[--outcome merged|merged-after-rework|discarded --rework-items N --rework-rounds N --defect-tags tag1,tag2]\n批量反馈：multi-ai feedback --batch OUTDIR --from verdicts.tsv（id accepted false_positive uncertain evidence；Tab分隔；可选 screen_min rework_min outcome rework_items rework_rounds defect_tags）\nrun/review/verify/batch/delegate 接受 --task-type X 与可选 --card CARD；run --canary-file FILE 接收本地已知答案 JSON 数组，不发送给模型。\n默认source=agent；人工决定需 --source human --human-confirmed 与明确用户证据。\n顺序复用自动保留历史；同输出并发立即失败；旧引擎缓存失配可能重新请求。\nreview --dry-run 保留额度采集行为；需要纯离线检查使用 routes 或 doctor。"
         );
     }
     Ok(())
@@ -364,6 +368,19 @@ fn install_config(args: &Args) -> Result<i32> {
 }
 
 pub async fn main_entry(argv: Vec<String>) -> Result<i32> {
+    let ledger = crate::ledger::Ledger::start(&argv);
+    let result = main_entry_inner(argv).await;
+    if let Some(ledger) = ledger {
+        ledger.finish(match &result {
+            Ok(code) => *code,
+            Err(error) if error.downcast_ref::<UsageError>().is_some() => 2,
+            Err(_) => 1,
+        });
+    }
+    result
+}
+
+async fn main_entry_inner(argv: Vec<String>) -> Result<i32> {
     let executable = argv
         .first()
         .and_then(|p| Path::new(p).file_name())
@@ -452,6 +469,9 @@ pub async fn main_entry(argv: Vec<String>) -> Result<i32> {
         )
         .await?;
         return Ok(0);
+    }
+    if command == "delegate" && args.positional.first().is_some_and(|v| v == "implement") {
+        crate::hooks::pre_delegate_implement(&args).await?;
     }
     let config = Config::load()?;
     match command.as_str() {
