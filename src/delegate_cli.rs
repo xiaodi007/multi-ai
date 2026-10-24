@@ -117,7 +117,8 @@ fn version(path: &Path) -> Result<String> {
                 String::from_utf8_lossy(&result.stdout).trim(),
             ));
         }
-        if start.elapsed() > Duration::from_secs(3) {
+        // 3s was exceeded by a two-line shell fixture under the parallel test suite.
+        if start.elapsed() > Duration::from_secs(10) {
             let _ = child.kill();
             let _ = child.wait();
             bail!("CLI version command timed out");

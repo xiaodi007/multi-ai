@@ -135,7 +135,7 @@
     "legacy_id": "kimi-k3-api",
     "pool": "moonshot-api",
     "family": "kimi",
-    "label": "Kimi K3 (Moonshot API key，计费；与 CLI 不同额度池)",
+    "label": "Kimi K3.1 Pro (Moonshot API key，计费；与 CLI 不同额度池)",
     "agentic": false,
     "cost": "metered",
     "rank": 60,

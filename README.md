@@ -134,6 +134,8 @@ multi-ai text run --task vision-review --image screenshot.png --out vision.md
 
 通路带 `anthropic_provider` 时，以 Claude Code 为外壳调用该厂商 profiles 的 `anthropicBaseUrl`：子进程环境清空后只注入该厂商 key（`ANTHROPIC_AUTH_TOKEN`）、地址与模型名，去掉宿主 `ANTHROPIC_*`／`CLAUDE*` 变量和其他厂商 key；`CLAUDE_CONFIG_DIR` 指向状态区的私有目录，跑完删除，用户 settings、hooks、插件与全局 CLAUDE.md 不加载。未配置 key 时不启动。权限由通路 argv 决定，示例只读通路用 `--restricted --strict-mcp-config --tools Read,Grep,Glob`。
 
+`delegate implement` 也接受带 `anthropic_provider` 的通路（如 `delegate implement claude-kimi-ro-cli --cwd 工作树 ...`）：通路配置的 argv 被替换为受控实施参数——`--restricted`（文件工具限于 cwd、拒绝 bypassPermissions）、`--tools Read,Grep,Glob,Edit,Write,Bash`、`acceptEdits`、Claude Code 沙箱（Bash 只在系统沙箱内、不允许出沙箱、默认不联网）以及禁止写 `<cwd>/.git/**`。前后快照、HEAD 变化检测与不自动提交沿用 Codex 实施的检查；`--network` 只支持 `codex-cli`。2026-10-24 用 DeepSeek 实测：cwd 内改文件与跑脚本可行，写 HOME、Write 工具越界、`git commit`、外网均被拒；沙箱放行临时目录（与 Codex workspace-write 相同），需要时用 `--watch` 让快照报告。
+
 保留原有 rank、订阅／计费分类、额度冷却和按额度池去重规则。多个报告、模型家族及额度池分别统计；两个额度池不能证明两份意见认知独立。新 `run` 使用明确通路名，旧名称仍在旧入口中保留原义。
 
 配置默认内置于程序，用户文件位于 `~/.config/multi-ai`：

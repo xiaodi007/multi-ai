@@ -1010,3 +1010,73 @@ fn replay_auth_error_still_auth_with_short_first_cooldown() {
             .as_secs_f64();
     assert!((590.0..=600.0).contains(&remaining), "{remaining}");
 }
+
+#[test]
+fn claude_shell_implementer_gets_restricted_sandbox_and_git_deny() {
+    let f = Fixture::new();
+    let claude = f.path("bin/claude");
+    fs::write(
+        &claude,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_ROOT/claude-argv\"\nprintf '%s' \"$ANTHROPIC_BASE_URL\" > \"$FAKE_ROOT/claude-url\"\nprintf changed > tracked.txt\nprintf 'shell implementation complete'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    let shell = json!({"id":"shell-impl","legacy_id":"shell-impl","pool":"deepseek-api","family":"deepseek","label":"shell","agentic":true,"cost":"metered","rank":1,"argv":["claude","-p","{prompt}","--tools","Read"],"extract":"stdout","default_timeout":60,"anthropic_provider":"deepseek"});
+    let plain = json!({"id":"plain-cli","legacy_id":"plain-cli","pool":"x","family":"x","label":"plain","agentic":true,"cost":"sub","rank":2,"argv":["claude","-p","{prompt}"],"extract":"stdout","default_timeout":60});
+    fs::write(
+        f.path("config/routes.json"),
+        serde_json::to_vec(&json!([shell, plain])).unwrap(),
+    )
+    .unwrap();
+    let run = |target: &str, extra: &[&str]| {
+        f.cmd()
+            .env("DEEPSEEK_API_KEY", "fixture-deepseek-key")
+            .args(["delegate", "implement", target, "--cwd"])
+            .arg(&f.cwd)
+            .arg("--prompt-file")
+            .arg(f.path("brief.md"))
+            .arg("--out")
+            .arg(f.path("summary.md"))
+            .arg("--path-prepend")
+            .arg(f.path("bin"))
+            .args(["--timeout", "20"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let out = run("shell-impl", &[]);
+    let status = f.status();
+    assert!(out.status.success(), "{status}");
+    assert_eq!(status["route"], "shell-impl");
+    assert_eq!(status["changed_files"], json!(["tracked.txt"]));
+    let argv = fs::read_to_string(f.temp.path().join("claude-argv")).unwrap();
+    let argv: Vec<&str> = argv.lines().collect();
+    for flag in ["--restricted", "--strict-mcp-config", "acceptEdits"] {
+        assert!(argv.contains(&flag), "{argv:?}");
+    }
+    // The configured read-only tool list is replaced by the controlled implementer one.
+    assert!(argv.contains(&"Read,Grep,Glob,Edit,Write,Bash"), "{argv:?}");
+    let settings: Value =
+        serde_json::from_str(argv[argv.iter().position(|a| *a == "--settings").unwrap() + 1])
+            .unwrap();
+    assert_eq!(settings["sandbox"]["enabled"], true);
+    assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
+    assert_eq!(
+        settings["permissions"]["deny"],
+        json!([format!(
+            "Edit(/{}/.git/**)",
+            fs::canonicalize(&f.cwd).unwrap().display()
+        )])
+    );
+    assert_eq!(
+        fs::read_to_string(f.temp.path().join("claude-url")).unwrap(),
+        "https://api.deepseek.com/anthropic"
+    );
+    f.git(&["checkout", "--", "tracked.txt"]);
+    let refused = run("plain-cli", &[]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("anthropic_provider"));
+    let network = run("shell-impl", &["--network"]);
+    assert!(!network.status.success());
+    assert!(String::from_utf8_lossy(&network.stderr).contains("--network is only supported"));
+}

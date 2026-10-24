@@ -436,6 +436,44 @@ fn controlled_route(route: &Route, codex: &Path, cwd: &Path, network: bool) -> R
     controlled.extract = "last-message-file".into();
     controlled
 }
+/// Claude Code shell equivalent of Codex workspace-write: --restricted confines file tools
+/// to cwd and refuses bypassPermissions and unattended git/settings writes; Bash runs only
+/// inside the Claude Code OS sandbox (no unsandboxed fallback, default network policy).
+/// The sandbox still lets Bash write `.git` under cwd, so a deny rule closes `git commit`.
+fn claude_controlled_route(route: &Route, claude: &Path, cwd: &Path) -> Route {
+    let mut controlled = route.clone();
+    let git = format!("Edit(/{}/.git/**)", cwd.display());
+    let settings = json!({"permissions":{"deny":[git]},
+        "sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":false}});
+    controlled.argv = vec![
+        claude.to_string_lossy().into_owned(),
+        "-p".into(),
+        "{prompt}".into(),
+        "--restricted".into(),
+        "--strict-mcp-config".into(),
+        "--tools".into(),
+        "Read,Grep,Glob,Edit,Write,Bash".into(),
+        "--permission-mode".into(),
+        "acceptEdits".into(),
+        "--settings".into(),
+        settings.to_string(),
+    ];
+    controlled.agentic = true;
+    controlled.api_alias = None;
+    controlled.extract = "stdout".into();
+    controlled
+}
+/// Implementers: Codex, or any Claude Code shell route over a provider endpoint.
+fn implementer(config: &Config, args: &Args) -> Result<String> {
+    let target = match args.positional.as_slice() {
+        [command, target] if command == "implement" => target.clone(),
+        _ => bail!("implementation requires delegate implement codex-cli|<claude shell route>"),
+    };
+    if target != "codex-cli" && config.route(&target, false)?.anthropic_provider.is_none() {
+        bail!("implementation requires codex-cli or a route with anthropic_provider");
+    }
+    Ok(target)
+}
 fn prepend_paths(config: &Config, args: &Args) -> Result<Vec<PathBuf>> {
     args.all("path-prepend")
         .iter()
@@ -466,8 +504,12 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
         defaults.set("task-type", "implement");
     }
     let args = &defaults;
-    if args.positional != ["implement", "codex-cli"] {
-        bail!("implementation requires delegate implement codex-cli");
+    let target = implementer(config, args)?;
+    let target = target.as_str();
+    if target != "codex-cli" && args.has("network") {
+        bail!(
+            "--network is only supported for codex-cli; Claude shells keep the sandbox network policy"
+        );
     }
     for option in ["resume", "fallback", "outdir"] {
         if args.has(option) {
@@ -499,9 +541,9 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
     let ctx = OutputContext::new(args, "implement", false)?;
     let registration = Registration::new(&cwd)?;
     let started = Instant::now();
-    let attempt = ctx.attempt("codex-cli")?;
+    let attempt = ctx.attempt(target)?;
     attempt
-        .update(json!({"route":"codex-cli","attempt_id":attempt.id,"cwd":cwd,"model_calls":0,"network":args.has("network")}))?;
+        .update(json!({"route":target,"attempt_id":attempt.id,"cwd":cwd,"model_calls":0,"network":args.has("network")}))?;
     let operation = execute(
         config,
         args,
@@ -516,7 +558,7 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
         Ok(result) => result,
         Err(error) => json!({"status":"error","complete":false,"error":format!("{error:#}")}),
     };
-    result["route"] = json!("codex-cli");
+    result["route"] = json!(target);
     result["run_id"] = json!(ctx.run_id);
     result["attempt_id"] = json!(attempt.id);
     result["artifacts"] = json!(attempt.dir);
@@ -555,7 +597,7 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
     ctx.finish(rc)?;
     if crate::stats::has_boundary_warnings(&result) {
         eprintln!(
-            "[codex-cli] boundary warnings (unattributed); details={}",
+            "[{target}] boundary warnings (unattributed); details={}",
             result["boundary_details"].as_str().unwrap_or("unknown")
         );
     }
@@ -565,7 +607,7 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
         println!("Wrote {}", output.display());
     } else {
         eprintln!(
-            "[codex-cli] {}: {}",
+            "[{target}] {}: {}",
             result["status"].as_str().unwrap_or("error"),
             result["error"].as_str().unwrap_or("")
         );
@@ -603,7 +645,7 @@ async fn execute(
         );
     }
     let config = config.with_path_prepend(&prepend_paths(config, args)?)?;
-    let mut route = config.route("codex-cli", false)?;
+    let mut route = config.route(&implementer(&config, args)?, false)?;
     let mut identity_args = args.clone();
     identity_args.set("cwd", cwd.to_string_lossy());
     let (identity, model_identity_known) = review::cli_identity(&route, &config, &identity_args)?;
@@ -635,15 +677,23 @@ async fn execute(
         ));
         return Ok(result);
     }
-    let Some(codex) = review::resolve_executable("codex", Some(&config)) else {
+    let shell = route.anthropic_provider.is_some();
+    let program = if shell { "claude" } else { "codex" };
+    let Some(executable) = review::resolve_executable(program, Some(&config)) else {
         let mut result = base;
         result["status"] = json!("missing");
         result["complete"] = json!(false);
-        result["error"] = json!("optional Codex CLI executable unavailable on configured PATH");
+        result["error"] = json!(format!(
+            "optional {program} CLI executable unavailable on configured PATH"
+        ));
         return Ok(result);
     };
     attempt.write("last-message.txt", b"")?;
-    route = controlled_route(&route, &codex, cwd, args.has("network"));
+    route = if shell {
+        claude_controlled_route(&route, &executable, cwd)
+    } else {
+        controlled_route(&route, &executable, cwd, args.has("network"))
+    };
     let watch = args
         .all("watch")
         .iter()
@@ -675,7 +725,12 @@ async fn execute(
     }
     execution_args.set("timeout", remaining);
     execution_args.flags.insert("implementation-task".into());
-    attempt.update(json!({"pool":route.pool,"family":route.family,"inputBytes":prompt.len(),"model_calls":1,"sandbox":"codex-workspace-write","model":base["model"],"model_source":base["model_source"]}))?;
+    let sandbox = if shell {
+        "claude-restricted-sandbox"
+    } else {
+        "codex-workspace-write"
+    };
+    attempt.update(json!({"pool":route.pool,"family":route.family,"inputBytes":prompt.len(),"model_calls":1,"sandbox":sandbox,"model":base["model"],"model_source":base["model_source"]}))?;
     let response =
         review::execute_cli_env(&route, &execution_args, &prompt, attempt, Some(&config)).await;
     // Inspect both independently even when the CLI failed or Git metadata was damaged.

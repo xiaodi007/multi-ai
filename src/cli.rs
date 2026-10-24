@@ -272,7 +272,7 @@ fn print_help(topic: Option<&str>, legacy: Option<&str>) -> Result<()> {
             "材料快照：\n  multi-ai pack --root DIR --input FILE --scope DIR --outdir NEW-DIR\n委派：\n  multi-ai delegate investigate kimi-cli-default --packet DIR --prompt-file TASK --outdir DIR --fallback grok-cli\n  multi-ai delegate extract deepseek-flash --packet DIR --prompt-file TASK --outdir DIR --resume --json\n角色：investigate|extract|challenge；--timeout 默认300秒（含备援）。\n--input/--scope/--fallback 可重复；默认stdout短交接，完整报告路径随结果返回。\n调查只开放快照的list/search/read；doctor展示隔离与版本可用性。\npack输出必须是新目录，快照immutable；--resume只复用身份完整匹配结果。"
         );
         println!(
-            "实施：\n  multi-ai delegate implement codex-cli --cwd WORKTREE --prompt-file BRIEF --out SUMMARY [--timeout SECONDS] [--path-prepend DIR] [--allow-dirty] [--network] [--watch PATH]\n仅macOS；cwd须为Git工作树顶层，默认拒绝未提交修改；SUMMARY置于cwd之外。\n固定受控workspace-write；--network允许命令访问任意网络地址，网络写入无法事后核对。运行前后记录HEAD/status/文件变化；不提交，不支持resume。 "
+            "实施：\n  multi-ai delegate implement codex-cli --cwd WORKTREE --prompt-file BRIEF --out SUMMARY [--timeout SECONDS] [--path-prepend DIR] [--allow-dirty] [--network] [--watch PATH]\n  multi-ai delegate implement claude-kimi-ro-cli ...  # 任一 anthropic_provider 通路：受控 --restricted＋Claude Code 沙箱，禁写 .git，无 --network\n仅macOS；cwd须为Git工作树顶层，默认拒绝未提交修改；SUMMARY置于cwd之外。\n固定受控workspace-write；--network允许命令访问任意网络地址，网络写入无法事后核对。运行前后记录HEAD/status/文件变化；不提交，不支持resume。 "
         );
     } else if legacy == Some("llm-run") || topic == Some("text") {
         println!(
