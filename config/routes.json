@@ -154,13 +154,14 @@
     "cost": "metered",
     "rank": 45,
     "argv": [
-      "{home}/.claude/bin/claude-ds",
+      "claude",
       "-p",
       "{prompt}",
       "--dangerously-skip-permissions"
     ],
     "extract": "stdout",
-    "default_timeout": 900
+    "default_timeout": 900,
+    "anthropic_provider": "deepseek"
   },
   {
     "id": "claude-deepseek-ro-cli",
