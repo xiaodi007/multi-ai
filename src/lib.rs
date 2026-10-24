@@ -5,6 +5,7 @@ pub mod broker;
 pub mod canary;
 pub mod cli;
 pub mod config;
+pub mod consensus;
 pub mod delegate;
 pub mod delegate_cli;
 mod hooks;

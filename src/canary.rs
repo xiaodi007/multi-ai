@@ -61,7 +61,7 @@ fn location(text: &str) -> Option<(String, u64)> {
     ))
 }
 
-fn positive(text: &str) -> Option<bool> {
+pub(crate) fn positive(text: &str) -> Option<bool> {
     let lower = text.to_lowercase();
     // Negated labels must be checked before their positive substrings.
     static NEGATIVE: LazyLock<Regex> = LazyLock::new(|| {
@@ -104,8 +104,16 @@ fn positive(text: &str) -> Option<bool> {
     None
 }
 
+pub(crate) static LOCATIONS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?P<path>[\p{L}\p{N}_./\\-]+)(?::|#L)(?P<line>\d+)").unwrap());
 pub fn evaluate(values: &[Canary], report: &str) -> Value {
-    let locations = Regex::new(r"(?P<path>[\p{L}\p{N}_./\\-]+)(?::|#L)(?P<line>\d+)").unwrap();
+    let locations = &*LOCATIONS;
+    let scopes = finding_scopes(report);
+    evaluate_scopes(values, &scopes, locations)
+}
+/// One table row or one finding paragraph per scope; a verdict heading owns what follows.
+pub(crate) fn finding_scopes(report: &str) -> Vec<String> {
+    let locations = &*LOCATIONS;
     let normalized = report.replace("\r\n", "\n");
     let heading = Regex::new(r"^\s*(#{1,6})\s+").unwrap();
     let numbered = Regex::new(r"^\s*[0-9]+[.)]\s+").unwrap();
@@ -161,6 +169,9 @@ pub fn evaluate(values: &[Canary], report: &str) -> Value {
     if !scope.is_empty() {
         scopes.push(scope);
     }
+    scopes
+}
+fn evaluate_scopes(values: &[Canary], scopes: &[String], locations: &Regex) -> Value {
     let details = values
         .iter()
         .map(|value| {

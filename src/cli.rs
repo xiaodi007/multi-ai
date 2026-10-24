@@ -105,6 +105,7 @@ fn command_options(command: &str, implement: bool) -> Option<&'static [&'static 
         ],
         "probe" => &["only", "timeout"],
         "stats" => &["state-dir", "task-type"],
+        "consensus" => &["out"],
         "scorecard" => &["state-dir", "task-type", "since"],
         "recommend" => &["task-type", "jobs", "only", "exclude", "cwd"],
         "usage" | "status" => &[],
@@ -229,6 +230,10 @@ fn help_app() -> Command {
         ("usage", "查看已有账户额度"),
         ("status", "查看冷却，不代表已经验证健康"),
         ("stats", "离线汇总本地运行记录；--json / --state-dir DIR"),
+        (
+            "consensus",
+            "离线对照多份复核报告：按 文件:行号 对齐，结论相反排最前；REPORT... [--out FILE] [--json]",
+        ),
         (
             "scorecard",
             "通路 × 任务类型成绩单；--task-type X --since DATE --json",
@@ -525,6 +530,9 @@ async fn main_entry_inner(argv: Vec<String>) -> Result<i32> {
     validate_review_args(command, &args)?;
     if command == "stats" {
         return crate::stats::command(&args);
+    }
+    if command == "consensus" {
+        return crate::consensus::command(&args);
     }
     if command == "scorecard" {
         return crate::scorecard::command(&args);

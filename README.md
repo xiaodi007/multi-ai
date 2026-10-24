@@ -295,6 +295,8 @@ batch 结束时在 outdir 写 `verdicts.template.tsv`：每个有完整报告的
 
 TSV 首行为 `id<Tab>accepted<Tab>false_positive<Tab>uncertain<Tab>evidence`，每项一行；未知数量留空，至少一个数量或实施字段已知，evidence 必填。可再加 `screen_min`、`rework_min`（分钟）、`outcome`、`rework_items`、`rework_rounds`、`defect_tags` 列；实施反馈可以把发现数量列留空。默认 source=agent；human 仍需用户明确决定和 `--source human --human-confirmed`。全部行预检通过后才追加；无当前完整报告、正文被修改或不存在的 id 会拒绝整次导入；已登记的完整越界诊断摘要也可录入。更正继续追加，成绩单对同份报告每个字段取最后一个已知值，不把更正重复相加。缓存上的反馈归回原始调用，避免恢复次数虚增成绩。
 
+多席位复核后可离线对照：`multi-ai consensus 报告A.md 报告B.md … [--out FILE] [--json]`，不调用模型。按 `文件:行号`（路径后缀、行号 ±3）对齐各家发现，分为「结论相反 / 仅一家 / 多家提到 / 全部提到」，结论相反排最前；席位名取文件名。判定识别与金丝雀相同（真问题/属实/误报/待定等）；没写位置但带判定的发现列「未对齐」。这是文本对齐，不做语义合并；带判定的编号段会吸收其后的段落（与金丝雀规则一致）。
+
 `scorecard [--task-type X] [--since YYYY-MM-DD] [--json]` 只读本地历史，不加载 API 配置或凭据。按「通路 × 任务类型」输出：
 
 | 指标 | 口径 |
