@@ -46,6 +46,28 @@ fn relative(base: &Path, path: &Path) -> PathBuf {
 fn cancelled(route: &str) -> Value {
     json!({"route":route,"status":"cancelled","complete":false,"model_calls":0,"error":"batch cancelled before adapter invocation"})
 }
+/// Earlier routes of a job that fell back, as `route:status(error)`; None without fallback.
+fn fallback_chain(row: &Value) -> Option<String> {
+    let attempts = row["route_attempts"].as_array()?;
+    let (_, earlier) = attempts.split_last()?;
+    if earlier.is_empty() {
+        return None;
+    }
+    Some(
+        earlier
+            .iter()
+            .map(|a| {
+                let error: String = a["error"].as_str().unwrap_or("").chars().take(80).collect();
+                format!(
+                    "{}:{}({error})",
+                    a["route"].as_str().unwrap_or("-"),
+                    a["status"].as_str().unwrap_or("-")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" → "),
+    )
+}
 pub async fn command(config: &Config, args: &Args) -> Result<i32> {
     let path = Path::new(args.get("jobs").context("batch requires --jobs FILE")?);
     let mut jobs: Jobs = serde_json::from_slice(&fs::read(path)?)?;
@@ -380,11 +402,11 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
     ctx.save_status(json!({"status":status,"complete":complete,"results":results}))?;
     let rc = i32::from(!complete);
     ctx.finish(rc)?;
-    eprintln!("id\troute\tstatus\tseconds\trun_id\tattempt_id\tcanary");
+    eprintln!("id\troute\tstatus\tseconds\trun_id\tattempt_id\tcanary\tfallback");
     for row in &results {
         let text = |key: &str| row[key].as_str().unwrap_or("-");
         eprintln!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             text("id"),
             text("route"),
             text("status"),
@@ -397,8 +419,19 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
                 format!("{}/{}", row["canary_hits"], row["canary_total"])
             } else {
                 "-".into()
-            }
+            },
+            fallback_chain(row).unwrap_or_else(|| "-".into())
         );
+    }
+    // A fallback hides why the planned route failed; say it where the host reads.
+    for row in &results {
+        if let Some(chain) = fallback_chain(row) {
+            eprintln!(
+                "⚠️  {} 回落：{chain} → {}",
+                row["id"].as_str().unwrap_or("-"),
+                row["route"].as_str().unwrap_or("-")
+            );
+        }
     }
     println!(
         "{}",

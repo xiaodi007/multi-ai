@@ -1,6 +1,6 @@
 # 委派 CLI 的读取边界
 
-`delegate` 使用独立适配器，旧 `run/review` 的厂商参数保持原义。当前验收 Kimi `2.1.1` 与 Grok `1.0.50 (c58f321264ba)`；其他版本停止受限委派，旧入口仍可使用。`doctor` 的 `delegation.available` 表示可尝试，不代表登录成功或账户还有额度。2026-10-04 的旧版本实测保留为历史证据。
+`delegate` 使用独立适配器，旧 `run/review` 的厂商参数保持原义。当前验收 Kimi `2.3.1` 与 Grok `1.0.67 (2fe064390d07)`；其他版本停止受限委派，旧入口仍可使用，`doctor` 在 stderr 和 `warnings` 中逐版本提示。`doctor` 的 `delegation.available` 表示可尝试，不代表登录成功或账户还有额度。2026-10-04 的旧版本实测保留为历史证据。
 
 ## 如何限制材料
 
@@ -59,6 +59,8 @@ cargo test --locked --test grok_refresh
 Kimi 检查真实 API 请求仅携带三个材料工具，并强制返回未经提供的 `Bash` 与 `select_tools` 调用，确认厂商拒绝执行。Grok 检查实际请求只有两个 MCP 元工具，分别强制返回 `bash`、`use_tool.file`、`use_tool.tool_input_file`，确认注册表与 Read 拒绝规则阻断调用，外部 canary 不被读取或改写。正向检查两家实际完成 list/search/read、拒绝材料包外路径并正常收尾；Grok 的 `search_tool` 必须成功，K3 请求实际传入 `thinking.effort=low`。确定性假 CLI 回归覆盖两次顺序和两次外层并发刷新、日志脱敏、共享登录守卫等待超时，未读取用户登录。
 
 2026-10-11 在 macOS arm64 上使用上述精确新版实际完成三项厂商 loopback 检查；共享认证和配置生成回归也已执行。Kimi 源码依据固定在 2.1.1 commit `f67e6398fb3210ad8ace970e2dfd5bcc984ed61f`，其 native 协议将 effort 编码为 `thinking.effort`。Grok 1.0.50 的公开源码未能按其 build SHA 获取，配置主分支只作为线索，实际二进制的正反向测试才是本轮版本门禁的验收依据。本轮没有发送真实外部模型请求，不宣称登录、额度或推理服务健康已验证。
+
+2026-10-24 本机 Kimi 升到 2.3.1、Grok 升到 1.0.67 后（升级前已是 2.2.0／1.0.62，委派此前已静默停用），用安装的二进制重跑上述三项 `installed_*` loopback 检查与 `grok_refresh` 回归，全部通过后改写版本门禁。Grok 的 `--version` 能读到自身配置时带 ` [stable]` 渠道后缀、读不到时没有，门禁去掉末尾渠道名后比对构建号。本轮同样只用 dummy key 与本机 mock 推理，没有为验收源码另行固定 Kimi 2.3.1 commit。
 
 2026-10-04 在 macOS arm64 上完成以上检查，并分别使用真实 Kimi/Grok 调查虚构两行源码：任务提示不包含答案，模型通过材料服务找到端口 `7319`，输出的文件哈希与行号通过主程序校验。Kimi 用 2 次材料调用，Grok用 4 次。真实 CLI 用量缺失时保留 null；没有把一次委派当成一次厂商模型请求，也没有据此宣称主模型节省率。
 

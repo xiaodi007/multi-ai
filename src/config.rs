@@ -23,6 +23,32 @@ pub struct Route {
     pub default_timeout: u64,
     #[serde(default)]
     pub api_alias: Option<String>,
+    /// Run the Claude Code CLI against this provider's Anthropic-compatible endpoint.
+    #[serde(default)]
+    pub anthropic_provider: Option<String>,
+}
+
+/// A Claude Code shell over a provider endpoint. Debug deliberately excludes the key.
+#[derive(Clone)]
+pub struct ClaudeShell {
+    pub provider: String,
+    pub base_url: String,
+    pub key_name: String,
+    pub key: String,
+    pub model: String,
+    pub small_model: String,
+}
+
+impl fmt::Debug for ClaudeShell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClaudeShell")
+            .field("provider", &self.provider)
+            .field("key_name", &self.key_name)
+            .field("key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("small_model", &self.small_model)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Route {
@@ -184,6 +210,15 @@ impl Config {
             {
                 bail!("Route {} has unknown extractor", route.id);
             }
+            if route.anthropic_provider.is_some() {
+                if route.api_alias.is_some() || route.argv.is_empty() {
+                    bail!(
+                        "Claude shell route {} needs argv and no api_alias",
+                        route.id
+                    );
+                }
+                self.claude_shell(route)?;
+            }
             if let Some(alias) = &route.api_alias {
                 if !aliases.contains_key(alias) {
                     bail!("Route {} refers to unknown API alias {alias}", route.id);
@@ -233,6 +268,40 @@ impl Config {
         self.profiles["providers"]
             .get(name)
             .with_context(|| format!("Unknown provider: {name}"))
+    }
+
+    /// Display, identity and execution of Claude shell routes share this resolver.
+    /// anthropicModels.main/small override the provider's pro/fast models.
+    pub fn claude_shell(&self, route: &Route) -> Result<Option<ClaudeShell>> {
+        let Some(name) = &route.anthropic_provider else {
+            return Ok(None);
+        };
+        let provider = self
+            .provider(name)
+            .with_context(|| format!("Claude shell route {}", route.id))?;
+        let base_url = provider["anthropicBaseUrl"]
+            .as_str()
+            .filter(|url| url.starts_with("https://"))
+            .with_context(|| format!("Provider {name} needs an https anthropicBaseUrl"))?;
+        let pick = |slot: &str, role: &str| {
+            provider["anthropicModels"][slot]
+                .as_str()
+                .or_else(|| provider["models"][role].as_str())
+                .filter(|model| !model.is_empty())
+                .map(str::to_owned)
+        };
+        let model = pick("main", "pro")
+            .with_context(|| format!("Provider {name} needs a main or pro model"))?;
+        let small_model = pick("small", "fast").unwrap_or_else(|| model.clone());
+        let (key_name, key) = self.first_key(provider);
+        Ok(Some(ClaudeShell {
+            provider: name.clone(),
+            base_url: base_url.to_owned(),
+            key_name,
+            key,
+            model,
+            small_model,
+        }))
     }
 
     pub fn first_key(&self, provider: &Value) -> (String, String) {
@@ -847,8 +916,19 @@ mod tests {
     fn routes_preserve_ranks_pools_and_legacy_names() {
         let config = config();
         config.validate().unwrap();
-        assert_eq!(config.routes.len(), 9);
+        assert_eq!(config.routes.len(), 12);
         assert_eq!(config.route("agy", true).unwrap().rank, 10);
+        // A Claude shell spends the same wallet as the provider's API route.
+        for (shell, api) in [
+            ("claude-ds-ro", "deepseek"),
+            ("claude-kimi-ro", "kimi-k3-api"),
+            ("claude-glm-ro", "glm"),
+        ] {
+            assert_eq!(
+                config.route(shell, true).unwrap().pool,
+                config.route(api, true).unwrap().pool
+            );
+        }
         assert_eq!(
             config.route("kimi", true).unwrap().pool,
             config.route("kimi-k3", true).unwrap().pool

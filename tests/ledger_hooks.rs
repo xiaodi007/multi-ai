@@ -352,3 +352,93 @@ fn hooks_see_allow_dirty_switch() {
         "0\n1\n"
     );
 }
+
+fn host() -> String {
+    String::from_utf8(Command::new("hostname").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+fn alive(pid: &str) -> bool {
+    Command::new("/bin/ps")
+        .args(["-p", pid, "-o", "pid="])
+        .output()
+        .unwrap()
+        .stdout
+        .iter()
+        .any(u8::is_ascii_digit)
+}
+fn wait_for(mut done: impl FnMut() -> bool) {
+    for _ in 0..100 {
+        if done() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("condition not reached");
+}
+
+#[test]
+fn stop_ends_only_the_named_run_and_its_vendor_group() {
+    let temp = fixture();
+    let root = temp.path();
+    fs::create_dir_all(root.join("config")).unwrap();
+    fs::write(root.join("slow.sh"), "echo $$ > child.pid\nsleep 30\n").unwrap();
+    fs::write(
+        root.join("config/routes.json"),
+        serde_json::to_vec(&json!([{"id":"slow","legacy_id":"slow","pool":"p","family":"test","label":"slow","agentic":true,"cost":"sub","rank":1,"argv":["/bin/sh",root.join("slow.sh"),"{prompt}"],"extract":"stdout","default_timeout":60}])).unwrap(),
+    )
+    .unwrap();
+    let mut run = command(root)
+        .args(["run", "slow", "task", "--out", "answer.md"])
+        .spawn()
+        .unwrap();
+    wait_for(|| root.join("child.pid").exists() && root.join("events.jsonl").exists());
+    let child = fs::read_to_string(root.join("child.pid"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let id = events(root)[0]["id"].as_str().unwrap().to_owned();
+    let list = command(root).args(["stop", "--list"]).output().unwrap();
+    let listed = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        listed.contains(&id) && listed.contains("running"),
+        "{listed}"
+    );
+    let stop = command(root).args(["stop", &id[..15]]).output().unwrap();
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    assert!(!run.wait().unwrap().success());
+    wait_for(|| !alive(&child));
+    assert_eq!(events(root).last().unwrap()["event"], "finish");
+    let again = command(root).args(["stop", &id]).output().unwrap();
+    assert!(!again.status.success());
+}
+
+#[test]
+fn stop_never_signals_a_reused_pid() {
+    let temp = fixture();
+    let root = temp.path();
+    let mut stranger = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    let pid = stranger.id();
+    fs::write(
+        root.join("events.jsonl"),
+        format!(
+            "{}\n",
+            json!({"v":1,"event":"start","actor":"multi-ai","id":"20990101T000000-1-x","pid":pid,"host":host(),"what":"run slow","at":"2099-01-01T00:00:00Z"})
+        ),
+    )
+    .unwrap();
+    let stop = command(root).args(["stop", "20990101"]).output().unwrap();
+    assert!(!stop.status.success());
+    assert!(String::from_utf8_lossy(&stop.stderr).contains("进程已不在"));
+    assert!(
+        stranger.try_wait().unwrap().is_none(),
+        "unrelated process was signalled"
+    );
+    stranger.kill().unwrap();
+    let _ = stranger.wait();
+}

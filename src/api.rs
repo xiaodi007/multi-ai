@@ -11,8 +11,10 @@ use regex::Regex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fmt,
     io::Read,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use tokio::time::{Instant as TokioInstant, sleep, timeout_at};
@@ -1288,6 +1290,249 @@ fn render_config(config: &Config, command: &str, args: &Args) -> Result<String> 
     Ok(lines.join("\n"))
 }
 async fn list_models(config: &Config, args: &Args) -> Result<String> {
+    let result = fetch_models(config, args).await?;
+    if args.has("json") {
+        return Ok(serde_json::to_string_pretty(&result)?);
+    }
+    let mut lines = vec![];
+    for (name, info) in result["providers"].as_object().unwrap() {
+        lines.push(format!(
+            "{}:",
+            config.profiles["providers"][name]["displayName"]
+                .as_str()
+                .unwrap_or(name)
+        ));
+        if info["ok"] == true {
+            for model in info["models"].as_array().unwrap() {
+                lines.push(format!("  {}", model.as_str().unwrap_or("")));
+            }
+        } else {
+            lines.push(format!(
+                "  error: {}",
+                info["error"].as_str().unwrap_or("unknown")
+            ));
+        }
+        lines.push(String::new());
+    }
+    lines.push(format!("Note: {}", result["note"].as_str().unwrap()));
+    Ok(lines.join("\n"))
+}
+
+/// Providers sharing one endpoint are listed under the first name.
+fn model_endpoint(provider: &str) -> &str {
+    if matches!(provider, "moonshot" | "kimi-k3") {
+        "kimi"
+    } else {
+        provider
+    }
+}
+
+/// Providers that a live alias, task, seat or route still selects; retired ones are skipped.
+fn used_providers(config: &Config) -> BTreeSet<String> {
+    fn walk(value: &Value, out: &mut BTreeSet<String>) {
+        match value {
+            Value::Object(map) if map.get("dead") != Some(&Value::Bool(true)) => {
+                if let Some(provider) = map.get("provider").and_then(Value::as_str) {
+                    out.insert(provider.to_owned());
+                }
+                map.values().for_each(|v| walk(v, out));
+            }
+            Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    let mut out = BTreeSet::new();
+    for (key, value) in config.profiles.as_object().into_iter().flatten() {
+        if key != "providers" {
+            walk(value, &mut out);
+        }
+    }
+    out.extend(
+        config
+            .routes
+            .iter()
+            .filter_map(|r| r.anthropic_provider.clone()),
+    );
+    out
+}
+
+/// Every model id the configuration would send, keyed by listing endpoint.
+fn configured_models(config: &Config) -> BTreeMap<String, BTreeMap<String, Vec<String>>> {
+    let used = used_providers(config);
+    let mut out: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    let mut add = |provider: &str, model: &str, place: String| {
+        if !model.is_empty() {
+            out.entry(model_endpoint(provider).to_owned())
+                .or_default()
+                .entry(model.to_owned())
+                .or_default()
+                .push(place);
+        }
+    };
+    for (name, provider) in config.profiles["providers"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(name, _)| used.contains(name.as_str()))
+    {
+        for group in ["models", "anthropicModels"] {
+            for (slot, model) in provider[group].as_object().into_iter().flatten() {
+                add(
+                    name,
+                    model.as_str().unwrap_or(""),
+                    format!("providers.{name}.{group}.{slot}"),
+                );
+            }
+        }
+    }
+    for (alias, spec) in config.profiles["aliases"].as_object().into_iter().flatten() {
+        if spec["dead"] != true
+            && let (Some(provider), Some(model)) =
+                (spec["provider"].as_str(), spec["model"].as_str())
+        {
+            add(provider, model, format!("aliases.{alias}"));
+        }
+    }
+    out
+}
+
+/// Compare configured ids with live listings: retired ids fail, unreferenced ids inform.
+pub fn model_drift(config: &Config, listed: &Value) -> Value {
+    let configured = configured_models(config);
+    let mut rows = serde_json::Map::new();
+    for (endpoint, info) in listed["providers"].as_object().into_iter().flatten() {
+        let wanted = configured.get(endpoint).cloned().unwrap_or_default();
+        if info["ok"] != true {
+            rows.insert(
+                endpoint.clone(),
+                json!({"checked":false,"error":info["error"],"configured":wanted.keys().collect::<Vec<_>>()}),
+            );
+            continue;
+        }
+        let live: BTreeSet<&str> = info["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        let missing: BTreeMap<_, _> = wanted
+            .iter()
+            .filter(|(model, _)| !live.contains(model.as_str()))
+            .collect();
+        let unreferenced: Vec<_> = live
+            .iter()
+            .filter(|model| !wanted.contains_key(**model))
+            .collect();
+        rows.insert(
+            endpoint.clone(),
+            json!({"checked":true,"missing":missing,"unreferenced":unreferenced}),
+        );
+    }
+    json!({"providers":rows})
+}
+
+/// Kimi Code managed models that no route selects, and route selections it lacks.
+pub fn kimi_cli_drift(config: &Config) -> Option<Value> {
+    let env = config.environment();
+    let home = env
+        .get("KIMI_CODE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env.get("HOME").map(|h| Path::new(h).join(".kimi-code")))?;
+    let text = std::fs::read_to_string(home.join("config.toml")).ok()?;
+    let available: BTreeSet<String> = Regex::new(r#"(?m)^\[models\."([^"]+)"\]"#)
+        .unwrap()
+        .captures_iter(&text)
+        .map(|c| c[1].to_owned())
+        .collect();
+    let default = Regex::new(r#"(?m)^default_model\s*=\s*"([^"]+)""#)
+        .unwrap()
+        .captures(&text)
+        .map(|c| c[1].to_owned());
+    let used: BTreeSet<String> = config
+        .routes
+        .iter()
+        .filter(|r| r.argv.first().is_some_and(|p| p == "kimi"))
+        .filter_map(|r| r.explicit_model().or_else(|| default.clone()))
+        .collect();
+    Some(json!({
+        "config": home.join("config.toml"),
+        "missing": used.difference(&available).collect::<Vec<_>>(),
+        "unreferenced": available.difference(&used).collect::<Vec<_>>(),
+    }))
+}
+
+fn joined(values: &Value) -> String {
+    values
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// doctor --models: exit 1 when the configuration would send a retired model id.
+pub async fn models_check(config: &Config, args: &Args) -> Result<i32> {
+    let listed = fetch_models(config, args).await?;
+    let mut report = model_drift(config, &listed);
+    report["kimiCli"] = kimi_cli_drift(config).unwrap_or(Value::Null);
+    let retired = report["providers"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .any(|(_, row)| row["missing"].as_object().is_some_and(|m| !m.is_empty()))
+        || report["kimiCli"]["missing"]
+            .as_array()
+            .is_some_and(|m| !m.is_empty());
+    if args.has("json") {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(i32::from(retired));
+    }
+    println!("模型名巡检（missing=配置会发送但接口没有；unreferenced=接口有但配置没用）：");
+    for (endpoint, row) in report["providers"].as_object().into_iter().flatten() {
+        if row["checked"] != true {
+            println!(
+                "⚠️  {endpoint} 未能核对：{}",
+                short_error(row["error"].as_str().unwrap_or("unknown"))
+            );
+            continue;
+        }
+        let missing = row["missing"].as_object().unwrap();
+        if missing.is_empty() {
+            println!("✅ {endpoint} 配置的模型名都在接口列表里");
+        }
+        for (model, places) in missing {
+            println!("❌ {endpoint} {model} 已不在接口列表：{}", joined(places));
+        }
+        if row["unreferenced"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty())
+        {
+            println!("   {endpoint} 未引用：{}", joined(&row["unreferenced"]));
+        }
+    }
+    if let Some(kimi) = report["kimiCli"].as_object() {
+        for model in kimi["missing"].as_array().into_iter().flatten() {
+            println!("❌ Kimi Code CLI 通路选了 {model}，但 CLI 配置里没有");
+        }
+        if kimi["unreferenced"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty())
+        {
+            println!(
+                "   Kimi Code CLI 有但没有通路在用：{}",
+                joined(&kimi["unreferenced"])
+            );
+        }
+    }
+    Ok(i32::from(retired))
+}
+
+fn short_error(text: &str) -> String {
+    text.chars().take(160).collect()
+}
+
+pub async fn fetch_models(config: &Config, args: &Args) -> Result<Value> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_millis(args.number("timeout-ms", 120000)?))
@@ -1331,32 +1576,9 @@ async fn list_models(config: &Config, args: &Args) -> Result<String> {
         };
         providers.insert(name.clone(), result);
     }
-    let result = json!({"generatedAt":chrono::Utc::now().to_rfc3339(),"note":"Providers kimi, kimi-k3 and moonshot share one endpoint; its models are listed once under kimi.","providers":providers});
-    if args.has("json") {
-        return Ok(serde_json::to_string_pretty(&result)?);
-    }
-    let mut lines = vec![];
-    for (name, info) in result["providers"].as_object().unwrap() {
-        lines.push(format!(
-            "{}:",
-            config.profiles["providers"][name]["displayName"]
-                .as_str()
-                .unwrap_or(name)
-        ));
-        if info["ok"] == true {
-            for model in info["models"].as_array().unwrap() {
-                lines.push(format!("  {}", model.as_str().unwrap_or("")));
-            }
-        } else {
-            lines.push(format!(
-                "  error: {}",
-                info["error"].as_str().unwrap_or("unknown")
-            ));
-        }
-        lines.push(String::new());
-    }
-    lines.push(format!("Note: {}", result["note"].as_str().unwrap()));
-    Ok(lines.join("\n"))
+    Ok(
+        json!({"generatedAt":chrono::Utc::now().to_rfc3339(),"note":"Providers kimi, kimi-k3 and moonshot share one endpoint; its models are listed once under kimi.","providers":providers}),
+    )
 }
 
 pub async fn text_command(config: &Config, command: &str, args: &Args) -> Result<i32> {

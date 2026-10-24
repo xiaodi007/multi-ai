@@ -6,6 +6,119 @@ pub(crate) fn tracked(command: &str) -> bool {
     matches!(command, "delegate" | "batch" | "review" | "run" | "verify")
 }
 
+fn ledger_file() -> Option<PathBuf> {
+    match env::var_os("AI_LEDGER_FILE") {
+        Some(v) if v.is_empty() || v == "off" => None,
+        Some(v) => Some(PathBuf::from(v)),
+        None => {
+            Some(PathBuf::from(env::var_os("HOME")?).join(".local/state/ai-ledger/events.jsonl"))
+        }
+    }
+}
+
+fn hostname() -> String {
+    Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|v| v.status.success())
+        .map(|v| String::from_utf8_lossy(&v.stdout).trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// Unfinished multi-ai starts recorded on this host, oldest first.
+fn unfinished() -> anyhow::Result<Vec<Value>> {
+    let file = ledger_file().ok_or_else(|| anyhow::anyhow!("ledger is disabled"))?;
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let events: Vec<Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let finished: std::collections::HashSet<&str> = events
+        .iter()
+        .filter(|e| e["event"] == "finish")
+        .filter_map(|e| e["id"].as_str())
+        .collect();
+    let host = hostname();
+    Ok(events
+        .iter()
+        .filter(|e| e["event"] == "start" && e["actor"] == "multi-ai" && e["host"] == host.as_str())
+        .filter(|e| e["id"].as_str().is_some_and(|id| !finished.contains(id)))
+        .cloned()
+        .collect())
+}
+
+/// The pid still runs the recorded multi-ai subcommand; a reused pid is never signalled.
+fn still_running(event: &Value) -> Option<i32> {
+    let pid = event["pid"].as_i64()? as i32;
+    let out = Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    let command = String::from_utf8_lossy(&out.stdout);
+    let sub = event["what"].as_str()?.split_whitespace().next()?;
+    let mut words = command.split_whitespace();
+    let program = words.next()?;
+    (["multi-ai", "ai-review"]
+        .iter()
+        .any(|name| program.ends_with(name))
+        && words.next() == Some(sub))
+    .then_some(pid)
+}
+
+/// stop [ID|ID-prefix] [--list]: SIGTERM one unfinished multi-ai run of this host. Each
+/// subcommand then kills its own vendor process groups; nothing else is signalled.
+pub(crate) fn stop_command(args: &crate::args::Args) -> anyhow::Result<i32> {
+    let open = unfinished()?;
+    let wanted = args.positional.first();
+    if args.has("list") || wanted.is_none() {
+        for event in &open {
+            println!(
+                "{}\t{}\t{}\t{}",
+                event["id"].as_str().unwrap_or("-"),
+                if still_running(event).is_some() {
+                    "running"
+                } else {
+                    "gone"
+                },
+                event["at"].as_str().unwrap_or("-"),
+                event["what"].as_str().unwrap_or("-")
+            );
+        }
+        return Ok(0);
+    }
+    let wanted = wanted.unwrap();
+    let matches: Vec<&Value> = open
+        .iter()
+        .filter(|e| {
+            e["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with(wanted.as_str()))
+        })
+        .collect();
+    let event = match matches.as_slice() {
+        [one] => *one,
+        [] => anyhow::bail!("本机没有未结束的 multi-ai 运行 {wanted}；multi-ai stop --list 查看"),
+        _ => anyhow::bail!("{wanted} 匹配到 {} 个运行，请给完整编号", matches.len()),
+    };
+    let Some(pid) = still_running(event) else {
+        anyhow::bail!("运行 {wanted} 的进程已不在，账本缺结束记录；无需结束");
+    };
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        anyhow::bail!(
+            "向 PID {pid} 发送 SIGTERM 失败：{}",
+            std::io::Error::last_os_error()
+        );
+    }
+    for _ in 0..100 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if still_running(event).is_none() {
+            println!("已结束 {} (PID {pid})", event["id"].as_str().unwrap_or("-"));
+            return Ok(0);
+        }
+    }
+    anyhow::bail!("已向 PID {pid} 发送 SIGTERM，10 秒后仍在运行")
+}
+
 pub(crate) struct Ledger {
     file: PathBuf,
     id: String,
@@ -42,11 +155,7 @@ impl Ledger {
         if !tracked(command) {
             return None;
         }
-        let file = match env::var_os("AI_LEDGER_FILE") {
-            Some(v) if v.is_empty() || v == "off" => return None,
-            Some(v) => PathBuf::from(v),
-            None => PathBuf::from(env::var_os("HOME")?).join(".local/state/ai-ledger/events.jsonl"),
-        };
+        let file = ledger_file()?;
         // Read metadata even when the command will subsequently fail argument validation.
         let option = |name: &str| -> Option<String> {
             let key = format!("--{name}");
@@ -95,12 +204,7 @@ impl Ledger {
             "verify" => Some("verify".into()),
             _ => None,
         });
-        let host = Command::new("hostname")
-            .output()
-            .ok()
-            .filter(|v| v.status.success())
-            .map(|v| String::from_utf8_lossy(&v.stdout).trim().to_owned())
-            .unwrap_or_default();
+        let host = hostname();
         let what = std::iter::once(command.as_str())
             .chain(parsed.positional.iter().map(String::as_str))
             .collect::<Vec<_>>()

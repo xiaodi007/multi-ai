@@ -138,6 +138,13 @@ fn quota_switches_pool_and_queued_jobs_skip_exhausted_pool() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
+    let summary = String::from_utf8_lossy(&first.stderr);
+    assert!(
+        summary
+            .lines()
+            .any(|l| l.contains("回落：quota:quota(") && l.ends_with("→ backup")),
+        "{summary}"
+    );
     assert_eq!(
         fs::read_to_string(root.join("quota-calls"))
             .unwrap()

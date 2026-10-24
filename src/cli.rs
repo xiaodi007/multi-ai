@@ -108,8 +108,9 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
         "usage" | "status" => &[],
         "reset" => &["all"],
         "routes" => &[],
-        "doctor" => &["live", "only", "timeout"],
+        "doctor" => &["live", "models", "updates", "json", "only", "timeout"],
         "outcome" => &["run", "report", "into", "all", "apply"],
+        "stop" => &["list"],
         "feedback" => &[
             "batch",
             "from",
@@ -201,7 +202,10 @@ fn help_app() -> Command {
         ("verify", "复核 --findings FILE"),
         ("text", "llm-run 原生文本功能；--timeout-ms 单位毫秒"),
         ("routes", "离线通路与模型来源；--json"),
-        ("doctor", "离线配置与依赖检查；--live 才探测"),
+        (
+            "doctor",
+            "离线配置与依赖检查；--live 才探测；--models 联网核对模型名；--updates 查厂商 CLI 新版",
+        ),
         (
             "feedback",
             "按报告代录反馈；--run ID --report ID --evidence TEXT",
@@ -223,6 +227,7 @@ fn help_app() -> Command {
             "按成绩单建议分配；--task-type X --jobs N --json",
         ),
         ("reset", "清指定额度池冷却"),
+        ("stop", "按账本编号结束本机一个未结束的运行；--list 列出"),
         ("install-config", "导入配置，不覆盖已有文件、不复制凭据"),
         ("help", "离线帮助"),
     ] {
@@ -321,13 +326,40 @@ fn doctor(config: &Config, args: &Args) -> Result<i32> {
             row["executable_available"] = json!(available);
             row["login_verified"] = json!(false);
             row["ready_to_attempt"] = json!(available);
+            if let Some(shell) = config.claude_shell(route)? {
+                let configured = !shell.key.is_empty();
+                row["anthropic_provider"] = json!(shell.provider);
+                row["credentials_configured"] = json!(configured);
+                row["ready_to_attempt"] = json!(available && configured);
+            }
         }
         rows.push(row);
     }
+    let warnings = version_warnings(&rows);
+    for warning in &warnings {
+        eprintln!("⚠️  {warning}");
+    }
     let value = json!({"engine":"multi-ai-rust","version":env!("CARGO_PKG_VERSION"),"platform":format!("{}-{}",std::env::consts::OS,std::env::consts::ARCH),
-        "offline":true,"python_node_required":false,"routes":rows});
+        "offline":true,"python_node_required":false,"warnings":warnings,"routes":rows});
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(0)
+}
+/// An upgraded vendor CLI silently disables delegation; one line per vendor version says so.
+fn version_warnings(rows: &[Value]) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    rows.iter()
+        .filter(|row| row["delegation"]["version_validated"] == false)
+        .filter_map(|row| {
+            let d = &row["delegation"];
+            let (actual, expected) = (d["version"].as_str()?, d["validated_version"].as_str()?);
+            seen.insert((actual.to_owned(), expected.to_owned())).then(|| {
+                format!(
+                    "{} 等通路的受限委派已停用：本机 {actual}，已验收 {expected}。重新验收：cargo test --locked --test delegate_cli installed_ -- --ignored（见 docs/CLI-ISOLATION.md）",
+                    row["route"].as_str().unwrap_or("-")
+                )
+            })
+        })
+        .collect()
 }
 fn install_config(args: &Args) -> Result<i32> {
     let directory = std::env::var_os("MULTI_AI_CONFIG_DIR")
@@ -468,6 +500,9 @@ async fn main_entry_inner(argv: Vec<String>) -> Result<i32> {
     if command == "outcome" {
         return crate::outcome::command(&args);
     }
+    if command == "stop" {
+        return crate::ledger::stop_command(&args);
+    }
     if command == "feedback" {
         return runtime::feedback_command(&args);
     }
@@ -515,7 +550,11 @@ async fn main_entry_inner(argv: Vec<String>) -> Result<i32> {
             Ok(0)
         }
         "doctor" => {
-            if args.has("live") {
+            if args.has("updates") {
+                crate::updates::command(&config, args.has("json")).await
+            } else if args.has("models") {
+                crate::api::models_check(&config, &args).await
+            } else if args.has("live") {
                 crate::review::command(&config, "probe", &args, legacy.is_some()).await
             } else {
                 doctor(&config, &args)

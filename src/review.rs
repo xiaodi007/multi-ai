@@ -115,6 +115,49 @@ fn secret_values(config: Option<&Config>, r: Option<&Route>) -> Vec<String> {
     values.dedup();
     values
 }
+/// Claude Code child environment: host Claude session variables and every provider key are
+/// dropped, so only the selected key leaves, and user settings/hooks/plugins stay unloaded.
+/// The private CLAUDE_CONFIG_DIR lives in the state area, never next to the output in cwd.
+fn claude_shell_env(
+    config: &Config,
+    shell: &crate::config::ClaudeShell,
+    config_dir: &Path,
+) -> Result<BTreeMap<String, String>> {
+    let key_names: HashSet<&str> = config.profiles["providers"]
+        .as_object()
+        .into_iter()
+        .flat_map(|p| p.values())
+        .flat_map(|provider| provider["keyEnv"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .collect();
+    let mut env: BTreeMap<String, String> = config
+        .environment()
+        .iter()
+        .filter(|(name, _)| {
+            !(name.starts_with("ANTHROPIC_")
+                || name.starts_with("CLAUDE_")
+                || name.starts_with("CLAUDECODE")
+                || key_names.contains(name.as_str()))
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    fs::create_dir_all(config_dir)?;
+    fs::set_permissions(config_dir, fs::Permissions::from_mode(0o700))?;
+    for (name, value) in [
+        ("ANTHROPIC_BASE_URL", shell.base_url.as_str()),
+        ("ANTHROPIC_AUTH_TOKEN", shell.key.as_str()),
+        ("ANTHROPIC_MODEL", shell.model.as_str()),
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL", shell.model.as_str()),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL", shell.model.as_str()),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", shell.small_model.as_str()),
+        ("CLAUDE_CODE_SUBAGENT_MODEL", shell.model.as_str()),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+        ("CLAUDE_CONFIG_DIR", &config_dir.to_string_lossy()),
+    ] {
+        env.insert(name.to_owned(), value.to_owned());
+    }
+    Ok(env)
+}
 fn mask(text: &str, secrets: &[String]) -> String {
     let mut clean = text.to_owned();
     for value in secrets {
@@ -498,7 +541,10 @@ pub(crate) fn cool_down(pool: &str, kind: &str, detail: &str) -> Result<()> {
             return Ok(());
         }
     };
-    let minutes = if kind == "quota" {
+    let billing = kind == "quota" && billing_failure(detail);
+    let minutes = if billing {
+        BILLING_COOLDOWN_MIN
+    } else if kind == "quota" {
         retry_clock(detail)
             .or_else(|| snapshot_wait(pool))
             .unwrap_or_else(|| {
@@ -526,8 +572,18 @@ pub(crate) fn cool_down(pool: &str, kind: &str, detail: &str) -> Result<()> {
             0
         };
         let minutes = if auth_failures >= 2 { 240.0 } else { minutes };
-        state["pools"][pool] = json!({"until":now()+minutes*60.0,"kind":kind,"auth_failures":auth_failures,"detail":short(detail,400),"since":Local::now().format("%Y-%m-%d %H:%M:%S").to_string()});
+        state["pools"][pool] = json!({"until":now()+minutes*60.0,"kind":kind,"billing":billing,"auth_failures":auth_failures,"detail":short(detail,400),"since":Local::now().format("%Y-%m-%d %H:%M:%S").to_string()});
     })
+}
+/// Arrears stay `quota` for compatibility, but waiting never clears them: the pool
+/// cools down until a recharge is followed by `reset`.
+const BILLING_COOLDOWN_MIN: f64 = 7.0 * 24.0 * 60.0;
+pub fn billing_failure(detail: &str) -> bool {
+    Regex::new(
+        r"(?i)insufficient[_ ]balance|suspended|recharge|余额不足|无可用资源包|请充值|欠费|arrears",
+    )
+    .unwrap()
+    .is_match(detail)
 }
 
 fn name(route: &Route, legacy: bool) -> &str {
@@ -755,6 +811,16 @@ pub(crate) fn cli_identity(r: &Route, config: &Config, args: &Args) -> Result<(V
     };
     let mut files = BTreeMap::new();
     program_fingerprints(&executable, config, &mut files)?;
+    if let Some(shell) = config.claude_shell(r)? {
+        // The isolated CLAUDE_CONFIG_DIR leaves no user config to hash; the endpoint and
+        // models are the whole identity. The key never enters it.
+        let overrides = json!({"provider":shell.provider,"baseUrl":shell.base_url,
+            "model":shell.model,"smallModel":shell.small_model});
+        return Ok((
+            json!({"files":files,"overridesSha256":sha(&serde_json::to_vec(&overrides)?),"modelIdentityKnown":true,"model":shell.model,"model_source":format!("provider:{}",shell.provider)}),
+            true,
+        ));
+    }
     let cwd = fs::canonicalize(args.get("cwd").unwrap_or("."))
         .unwrap_or_else(|_| PathBuf::from(args.get("cwd").unwrap_or(".")));
     // A shell fixture/wrapper is implementation too. Hash existing literal file arguments;
@@ -973,6 +1039,12 @@ impl Drop for RequestCleanup {
         let _ = fs::remove_file(&self.0);
     }
 }
+struct DirCleanup(PathBuf);
+impl Drop for DirCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 struct ProcessGroup(i32);
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
@@ -1093,6 +1165,17 @@ pub(crate) async fn execute_cli_env(
             json!({"status":"missing","error":format!("找不到可执行文件：{first}"),"content":"","complete":false,"seconds":0.0}),
         );
     };
+    let shell = match config {
+        Some(config) => config.claude_shell(r)?,
+        None if r.anthropic_provider.is_some() => bail!("Claude shell route {} needs config", r.id),
+        None => None,
+    };
+    if let Some(shell) = shell.as_ref().filter(|shell| shell.key.is_empty()) {
+        let _ = fs::remove_file(&promptfile);
+        return Ok(
+            json!({"status":"missing","error":format!("未配置 {}",shell.key_name),"content":"","complete":false,"seconds":0.0}),
+        );
+    }
     let mut c = Command::new(executable);
     c.args(&argv[1..])
         .stdin(std::process::Stdio::null())
@@ -1103,7 +1186,14 @@ pub(crate) async fn execute_cli_env(
     if let Some(path) = args.get("cwd") {
         c.current_dir(path);
     }
-    if let Some(config) = config {
+    let mut _shell_cleanup = None;
+    if let (Some(config), Some(shell)) = (config, &shell) {
+        let dir = runtime::state_dir()
+            .join("claude-shell")
+            .join(attempt.dir.file_name().context("attempt dir has no name")?);
+        _shell_cleanup = Some(DirCleanup(dir.clone()));
+        c.env_clear().envs(claude_shell_env(config, shell, &dir)?);
+    } else if let Some(config) = config {
         c.envs(config.environment());
     }
     let start = Instant::now();
@@ -2316,7 +2406,12 @@ fn show_status(config: &Config, args: &Args) -> Result<()> {
             .map(|r| r.legacy_id.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        if e["until"].as_f64().unwrap_or(0.0) > now() {
+        if e["until"].as_f64().unwrap_or(0.0) > now() && e["billing"] == true {
+            println!(
+                "💳 {pool} 欠费停用，充值后运行 multi-ai reset {pool} {names}\n  {}",
+                short(s(e, "detail"), 160)
+            );
+        } else if e["until"].as_f64().unwrap_or(0.0) > now() {
             println!(
                 "🧊 {pool} 冷却中 {:.0}分钟 ({}) {names}\n  {}",
                 ((e["until"].as_f64().unwrap() - now()) / 60.0).max(0.0),

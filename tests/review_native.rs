@@ -1094,3 +1094,132 @@ fn vendor_diagnostics_exclude_tools_and_assistant_text() {
         );
     }
 }
+
+fn shell_route(script: &Path, record: &Path) -> Value {
+    let mut route = make_route("shell-cli", "deepseek-api", 1, script, "stdout");
+    route["argv"] = json!(["/bin/sh", script, record]);
+    route["anthropic_provider"] = json!("deepseek");
+    route
+}
+
+#[test]
+fn claude_shell_route_gets_only_its_provider_endpoint_and_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let record = temp.path().join("env.txt");
+    let p = script(temp.path(), "claude.sh", "env > \"$1\"\necho done\n");
+    let f = Fixture::new(json!([shell_route(&p, &record)]));
+    let key = "deepseek-key-for-shell-test";
+    ok(&f
+        .command()
+        .env("DEEPSEEK_API_KEY", key)
+        .env("ZHIPU_API_KEY", "other-provider-key")
+        .env("ANTHROPIC_API_KEY", "host-anthropic-key")
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_ENTRYPOINT", "host")
+        .args(["run", "shell-cli", "task", "--out", "answer.md"])
+        .output()
+        .unwrap());
+    let env = fs::read_to_string(&record).unwrap();
+    for line in [
+        "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic",
+        &format!("ANTHROPIC_AUTH_TOKEN={key}"),
+        "ANTHROPIC_MODEL=deepseek-v4-pro",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-flash",
+        "CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro",
+    ] {
+        assert!(env.lines().any(|l| l == line), "missing {line}");
+    }
+    for name in [
+        "DEEPSEEK_API_KEY=",
+        "ZHIPU_API_KEY=",
+        "ANTHROPIC_API_KEY=",
+        "CLAUDECODE=",
+        "CLAUDE_CODE_ENTRYPOINT=",
+    ] {
+        assert!(!env.lines().any(|l| l.starts_with(name)), "leaked {name}");
+    }
+    let dir = env
+        .lines()
+        .find_map(|l| l.strip_prefix("CLAUDE_CONFIG_DIR="))
+        .unwrap();
+    assert!(Path::new(dir).starts_with(&f.state), "{dir}");
+    assert!(
+        !Path::new(dir).exists(),
+        "private Claude config must be removed: {dir}"
+    );
+    let routes: Value = serde_json::from_slice(&f.run(&["routes", "--json"]).stdout).unwrap();
+    assert_eq!(routes[0]["model"], "deepseek-v4-pro");
+    assert_eq!(routes[0]["model_source"], "provider:deepseek");
+}
+
+#[test]
+fn claude_shell_route_without_key_never_launches() {
+    let temp = tempfile::tempdir().unwrap();
+    let record = temp.path().join("env.txt");
+    let p = script(temp.path(), "claude.sh", "env > \"$1\"\n");
+    let f = Fixture::new(json!([shell_route(&p, &record)]));
+    failure(&f.run(&["run", "shell-cli", "task", "--out", "answer.md"]));
+    assert!(!record.exists());
+    let result = value(&f.cwd.join("answer.md.status.json"));
+    assert_eq!(result["status"], "missing");
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("DEEPSEEK_API_KEY")
+    );
+}
+
+#[test]
+fn arrears_cool_down_until_reset_and_status_says_recharge() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = script(
+        temp.path(),
+        "arrears.sh",
+        "echo 'HTTP 429: Your account org-x is suspended due to insufficient balance, please recharge your account' >&2\nexit 1\n",
+    );
+    let f = Fixture::new(json!([make_route("owed", "owed-pool", 1, &p, "stdout")]));
+    failure(&f.run(&["run", "owed", "task", "--out", "answer.md"]));
+    assert_eq!(
+        value(&f.cwd.join("answer.md.status.json"))["status"],
+        "quota"
+    );
+    let state = value(&f.state.join("review/state.json"));
+    let pool = &state["pools"]["owed-pool"];
+    assert_eq!(pool["billing"], true);
+    let days = (pool["until"].as_f64().unwrap() - pool_now()) / 86400.0;
+    assert!(days > 6.0, "{pool}");
+    let status = String::from_utf8_lossy(&f.run(&["status"]).stdout).into_owned();
+    assert!(
+        status.contains("欠费停用") && status.contains("multi-ai reset owed-pool"),
+        "{status}"
+    );
+    ok(&f.run(&["reset", "owed-pool"]));
+    let status = String::from_utf8_lossy(&f.run(&["status"]).stdout).into_owned();
+    assert!(status.contains("owed-pool 未冷却"), "{status}");
+}
+
+#[test]
+fn ordinary_quota_keeps_short_cooldown() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = script(
+        temp.path(),
+        "quota.sh",
+        "echo 'quota exceeded' >&2\nexit 1\n",
+    );
+    let f = Fixture::new(json!([make_route("q", "q-pool", 1, &p, "stdout")]));
+    failure(&f.run(&["run", "q", "task", "--out", "answer.md"]));
+    let pool = &value(&f.state.join("review/state.json"))["pools"]["q-pool"];
+    assert_eq!(pool["billing"], false);
+    assert!(
+        pool["until"].as_f64().unwrap() - pool_now() < 2.0 * 3600.0,
+        "{pool}"
+    );
+}
+
+fn pool_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+}

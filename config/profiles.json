@@ -7,7 +7,7 @@
     "glm": "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3"
   },
   "namingNotes": [
-    "OpenAI-compat DeepSeek ids are exactly deepseek-v4-flash and deepseek-v4-pro — no [1m] suffix.",
+    "OpenAI-compat DeepSeek ids are exactly deepseek-flash and deepseek-v4-pro — no [1m] suffix. deepseek-v4-flash is a retired alias (2026-10-17).",
     "api.moonshot.cn hosts three wire protocols: kimi (K2.x thinking param), kimi-k3 (reasoning_effort + stream), moonshot (V1, no thinking). moonshot-v1 and kimi-k2.5 sunset 2026-08-31.",
     "GLM-5.3 always thinks (cannot disable). GLM-5.3-Flash is the cheap multimodal default for third-opinion and vision."
   ],
@@ -133,14 +133,15 @@
     "deepseek": {
       "displayName": "DeepSeek",
       "baseUrl": "https://api.deepseek.com/v1",
+      "anthropicBaseUrl": "https://api.deepseek.com/anthropic",
       "chatPath": "/chat/completions",
       "modelsPath": "/models",
       "keyEnv": ["DEEPSEEK_API_KEY"],
       "models": {
-        "fast": "deepseek-v4-flash",
+        "fast": "deepseek-flash",
         "pro": "deepseek-v4-pro",
         "reasoning": "deepseek-v4-pro",
-        "long": "deepseek-v4-flash"
+        "long": "deepseek-flash"
       },
       "modelEnv": {
         "fast": "DEEPSEEK_CHAT_MODEL",
@@ -158,7 +159,7 @@
         "effortValues": ["high", "max"]
       },
       "notes": [
-        "Valid API ids: deepseek-v4-flash, deepseek-v4-pro (Pro checkpoint 0813, Flash 0731).",
+        "Valid API ids (list-models 2026-10-24): deepseek-flash (V4.1-Flash-1017), deepseek-v4-pro (Pro checkpoint 0813). deepseek-v4-flash is a retired alias, still accepted.",
         "Flash is the default compressor. Pro wins on actionable long-doc distillation and hard format constraints.",
         "Neither model knows post-mid-2025 facts. Flash fabricates dated 2026 events. Route freshness to host web or Codex."
       ]
@@ -202,16 +203,17 @@
       ]
     },
     "kimi-k3": {
-      "displayName": "Kimi K3",
+      "displayName": "Kimi K3.1",
       "baseUrl": "https://api.moonshot.cn/v1",
+      "anthropicBaseUrl": "https://api.moonshot.cn/anthropic",
       "chatPath": "/chat/completions",
       "modelsPath": "/models",
       "keyEnv": ["KIMI_API_KEY", "MOONSHOT_API_KEY"],
       "models": {
-        "fast": "kimi-k3",
-        "pro": "kimi-k3",
-        "reasoning": "kimi-k3",
-        "long": "kimi-k3"
+        "fast": "kimi-k3.1-pro-highspeed",
+        "pro": "kimi-k3.1-pro",
+        "reasoning": "kimi-k3.1-pro",
+        "long": "kimi-k3.1-pro"
       },
       "modelEnv": {
         "reasoning": "KIMI_K3_MODEL"
@@ -263,12 +265,13 @@
         "effortSupported": false
       },
       "notes": [
-        "DEAD after 2026-08-31. Compression replacement: deepseek-v4-flash. Extraction with judgment: kimi-k3-low."
+        "DEAD after 2026-08-31. Compression replacement: deepseek-flash. Extraction with judgment: kimi-k3-low."
       ]
     },
     "glm": {
       "displayName": "GLM",
       "baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "anthropicBaseUrl": "https://open.bigmodel.cn/api/anthropic",
       "chatPath": "/chat/completions",
       "modelsPath": "/models",
       "keyEnv": ["ZHIPU_API_KEY", "GLM_API_KEY"],
@@ -450,13 +453,14 @@
     }
   },
   "aliases": {
-    "deepseek": { "provider": "deepseek", "model": "deepseek-v4-flash", "thinking": "off", "temperature": 0.2, "maxTokens": 8000, "desc": "= deepseek-flash. Cheap workhorse." },
-    "deepseek-flash": { "provider": "deepseek", "model": "deepseek-v4-flash", "thinking": "off", "temperature": 0.2, "maxTokens": 8000, "desc": "V4 flash, no thinking. Compression, extraction, bulk." },
+    "deepseek": { "provider": "deepseek", "model": "deepseek-flash", "thinking": "off", "temperature": 0.2, "maxTokens": 8000, "desc": "= deepseek-flash. Cheap workhorse." },
+    "deepseek-flash": { "provider": "deepseek", "model": "deepseek-flash", "thinking": "off", "temperature": 0.2, "maxTokens": 8000, "desc": "V4.1 flash, no thinking. Compression, extraction, bulk." },
     "deepseek-pro": { "provider": "deepseek", "model": "deepseek-v4-pro", "thinking": "off", "temperature": 0.2, "maxTokens": 8000, "desc": "V4 pro, thinking OFF. For thinking mode use --task review / think." },
     "kimi": { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "high", "maxTokens": 16000, "desc": "= kimi-k3-high. Perspective, not savings. Minutes." },
-    "kimi-k3": { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "max", "maxTokens": 20000, "desc": "K3 effort=max, streamed. Deepest adversarial pass." },
-    "kimi-k3-high": { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "high", "maxTokens": 16000, "desc": "K3 effort=high, streamed. Default second opinion." },
-    "kimi-k3-low": { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "low", "maxTokens": 8000, "desc": "K3 effort=low, seconds. Rule-clear extraction." },
+    "kimi-k3": { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "max", "maxTokens": 20000, "desc": "K3.1 Pro effort=max, streamed. Deepest adversarial pass." },
+    "kimi-k3.0": { "provider": "kimi-k3", "model": "kimi-k3", "effort": "high", "maxTokens": 16000, "desc": "Pinned old K3 (pre-K3.1) for comparison/fallback." },
+    "kimi-k3-high": { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "high", "maxTokens": 16000, "desc": "K3.1 Pro effort=high, streamed. Default second opinion." },
+    "kimi-k3-low": { "provider": "kimi-k3", "modelRole": "reasoning", "effort": "low", "maxTokens": 8000, "desc": "K3.1 Pro effort=low, seconds. Rule-clear extraction." },
     "kimi-code": { "provider": "kimi", "model": "kimi-k2.7-code", "thinking": "on", "maxTokens": 8000, "desc": "K2.7 Code. Always thinks. Snippet second look, not K3 max." },
     "kimi-code-fast": { "provider": "kimi", "model": "kimi-k2.7-code-highspeed", "thinking": "on", "maxTokens": 4000, "desc": "K2.7 Code highspeed ~180 tok/s. Always thinks." },
     "glm": { "provider": "glm", "modelRole": "reasoning", "thinking": "on", "effort": "high", "temperature": 0.3, "maxTokens": 8000, "desc": "= glm-5.3. Independent third opinion; always thinks." },

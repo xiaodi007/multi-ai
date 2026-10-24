@@ -115,7 +115,7 @@ multi-ai text dispatch --domain product --kind debate --input evidence.md --out 
 multi-ai text run --task vision-review --image screenshot.png --out vision.md
 ```
 
-`doctor` 默认只检查本地配置、凭据是否配置及 CLI 是否可执行，不验证登录或账户健康。`doctor --live`、`probe` 和 `text list-models` 才联网；模型探测会使用额度。`review --dry-run` 保留旧版的额度采集行为，需要纯离线检查时使用 `routes` 或 `doctor`。
+`doctor` 默认只检查本地配置、凭据是否配置及 CLI 是否可执行，不验证登录或账户健康；本机 Kimi/Grok 版本与委派已验收版本不一致时，在 stderr 与 `warnings` 中提示。`doctor --live`、`probe` 和 `text list-models` 才联网；模型探测会使用额度。`doctor --models` 联网拉取各厂商模型列表（不调用模型），配置会发送的模型名已不在列表时退出码为 1，并列出接口有但配置未引用的模型和 Kimi Code CLI 未被通路使用的托管模型。`doctor --updates` 列出 claude/codex/kimi/grok/agy 的本机与最新版本，Kimi/Grok 有新版时提示升级后需重新验收委派。`review --dry-run` 保留旧版的额度采集行为，需要纯离线检查时使用 `routes` 或 `doctor`。
 
 ## 通路、配置与凭据
 
@@ -127,9 +127,12 @@ multi-ai text run --task vision-review --image screenshot.png --out vision.md
 | `glm-api` | `glm` | `zhipu` | profiles 别名 `glm` |
 | `deepseek-pro-api` | `deepseek` | `deepseek-api` | profiles 别名 `deepseek-pro` |
 | `claude-deepseek-cli` | `claude-ds` | `deepseek-api` | Claude Code 壳配置 |
+| `claude-*-ro-cli` | `claude-*-ro` | 对应厂商池 | `anthropic_provider` 解析：`anthropicModels.main/small`，缺省取 `models.pro/fast` |
 | `kimi-cli-default` | `kimi` | `kimi-code` | CLI 默认，未知 |
 | `kimi-k3-cli` | `kimi-k3` | `kimi-code` | 固定 `kimi-code/k3` |
 | `kimi-k3-api` | `kimi-k3-api` | `moonshot-api` | profiles 别名 `kimi-k3` |
+
+通路带 `anthropic_provider` 时，以 Claude Code 为外壳调用该厂商 profiles 的 `anthropicBaseUrl`：子进程环境清空后只注入该厂商 key（`ANTHROPIC_AUTH_TOKEN`）、地址与模型名，去掉宿主 `ANTHROPIC_*`／`CLAUDE*` 变量和其他厂商 key；`CLAUDE_CONFIG_DIR` 指向状态区的私有目录，跑完删除，用户 settings、hooks、插件与全局 CLAUDE.md 不加载。未配置 key 时不启动。权限由通路 argv 决定，示例只读通路用 `--restricted --strict-mcp-config --tools Read,Grep,Glob`。
 
 保留原有 rank、订阅／计费分类、额度冷却和按额度池去重规则。多个报告、模型家族及额度池分别统计；两个额度池不能证明两份意见认知独立。新 `run` 使用明确通路名，旧名称仍在旧入口中保留原义。
 
@@ -199,7 +202,7 @@ CLI 分类只使用诊断信道：Codex 的 stdout 只取 `error.message` 和 `t
 
 | 分类 | 诊断示例 | 处理 |
 |---|---|---|
-| `quota` | quota exhausted、usage limit | 额度池冷却，按原规则换备选；5 小时用量错误默认冷却 5 小时 |
+| `quota` | quota exhausted、usage limit | 额度池冷却，按原规则换备选；5 小时用量错误默认冷却 5 小时；余额不足、账户停用、请充值等欠费诊断记 `billing: true`，冷却 7 天直到充值后 `reset`，`status` 显示「欠费停用」 |
 | `rate_limit` | 429、1302、too many requests | 预算内指数退避重试，不写池冷却 |
 | `capacity` | at capacity、overloaded、server is busy、503、try a different model、temporarily unavailable | CLI 复用限流退避；run/batch 重试耗尽后可使用显式备选（含同池），不写池冷却 |
 | `auth` | 独立的 401、403、Unauthorized、Forbidden、authentication | 首次冷却 10 分钟；同池连续第二次及以后冷却 240 分钟；实际非 auth 执行结果或手动 reset 清零连续次数 |
@@ -215,6 +218,15 @@ multi-ai status
 multi-ai reset openai     # 清指定额度池及连续 auth 次数
 multi-ai reset --all      # 清全部额度池冷却
 ```
+
+结束一个正在跑的运行（只认本机账本里未结束、且进程仍是同一 multi-ai 子命令的记录；子命令收到 SIGTERM 后自行结束厂商进程组）：
+
+```sh
+multi-ai stop --list
+multi-ai stop 20261024T005326-90838   # 账本编号或其唯一前缀
+```
+
+`batch` 结束时的汇总表多一列 `fallback`，回落的任务另起一行写明原通路的状态与错误。
 
 `stats` 只读本地运行记录，不加载 API 配置或凭据、不联网。它按记录中的实际通路汇总真实适配调用的次数、成功率、耗时中位数、P90、失败类型、输入与最终输出字节；缓存命中和未调用适配器的跳过记录单列。中位数对偶数样本取两数平均，P90 取 nearest rank（向上取整第 90% 位）；失败耗时也在样本内。历史记录缺字段会留空并显示有效样本数，不按当前配置猜历史模型。`--state-dir DIR` 可只读其他状态目录；丢失的进度目录会尽量用 manifest 回补，并报告缺失和损坏记录数。统计不证明答案正确或节省 token。
 

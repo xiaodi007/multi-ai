@@ -626,7 +626,7 @@ async fn explicit_no_stream_images_stdin_empty_input_and_dead_aliases() {
         "{}",
         String::from_utf8_lossy(&good.stderr)
     );
-    assert_eq!(f.wires.lock().unwrap()[2]["model"], "deepseek-v4-flash");
+    assert_eq!(f.wires.lock().unwrap()[2]["model"], "deepseek-flash");
 }
 #[tokio::test]
 async fn roundtable_partial_seat_preserves_previous_complete_report_and_domains_resolve_tasks() {
@@ -681,7 +681,7 @@ async fn roundtable_partial_seat_preserves_previous_complete_report_and_domains_
         String::from_utf8_lossy(&good.stderr)
     );
     let wires = f.wires.lock().unwrap();
-    assert_eq!(wires[3]["model"], "deepseek-v4-flash");
+    assert_eq!(wires[3]["model"], "deepseek-flash");
     assert!(
         wires[3]["messages"][0]["content"]
             .as_str()

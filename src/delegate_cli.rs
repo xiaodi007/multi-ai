@@ -22,8 +22,8 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, process::Command, sync::mpsc};
 
-const KIMI_VERSION: &str = "2.1.1";
-const GROK_VERSION: &str = "grok 1.0.50 (c58f321264ba)";
+pub(crate) const KIMI_VERSION: &str = "2.3.1";
+pub(crate) const GROK_VERSION: &str = "grok 1.0.67 (2fe064390d07)";
 const MAX_LOG_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -113,7 +113,9 @@ fn version(path: &Path) -> Result<String> {
             if result.stdout.len() > 4096 {
                 bail!("CLI version output exceeded its limit");
             }
-            return Ok(String::from_utf8_lossy(&result.stdout).trim().to_owned());
+            return Ok(without_channel(
+                String::from_utf8_lossy(&result.stdout).trim(),
+            ));
         }
         if start.elapsed() > Duration::from_secs(3) {
             let _ = child.kill();
@@ -121,6 +123,16 @@ fn version(path: &Path) -> Result<String> {
             bail!("CLI version command timed out");
         }
         std::thread::sleep(Duration::from_millis(15));
+    }
+}
+/// Grok appends its release channel (` [stable]`) only when it can read its own config,
+/// so the same binary prints two strings depending on HOME. The gate compares the build.
+fn without_channel(version: &str) -> String {
+    match version.rsplit_once(" [") {
+        Some((build, channel)) if channel.ends_with(']') && !channel.contains(' ') => {
+            build.to_owned()
+        }
+        _ => version.to_owned(),
     }
 }
 fn credential_path(home: &Path, vendor: Vendor) -> PathBuf {
