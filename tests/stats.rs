@@ -347,3 +347,22 @@ fn unfinished_runs_whose_process_is_gone_count_as_lost() {
     assert_eq!(fake["failures"]["lost"], 2, "{fake}");
     drop(held);
 }
+
+#[test]
+fn subcommand_help_lists_the_options_validation_accepts() {
+    let help = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_multi-ai"))
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert!(help(&["stats", "--help"]).contains("stats 可用参数：--state-dir --task-type"));
+    let delegate = help(&["delegate", "--help"]);
+    assert!(delegate.contains("delegate implement 可用参数："));
+    assert!(delegate.contains("--preflight"));
+    assert!(help(&["help", "batch"]).contains("--preflight-timeout"));
+}

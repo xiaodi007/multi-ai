@@ -20,9 +20,9 @@ impl std::error::Error for UsageError {}
 fn parse_args(tokens: &[String]) -> Result<Args> {
     Args::parse(tokens).map_err(|error| UsageError(error.to_string()).into())
 }
-fn validate_review_args(command: &str, args: &Args) -> Result<()> {
-    let common = &["help", "json", "quiet"];
-    let specific: &[&str] = match command {
+/// Options each command accepts beyond help/json/quiet; validation and help share it.
+fn command_options(command: &str, implement: bool) -> Option<&'static [&'static str]> {
+    Some(match command {
         "batch" => &[
             "only",
             "exclude",
@@ -134,7 +134,7 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
         ],
         "install-config" => &["from"],
         "pack" => &["root", "input", "scope", "outdir"],
-        "delegate" if args.positional.first().is_some_and(|v| v == "implement") => &[
+        "delegate" if implement => &[
             "task-type",
             "cwd",
             "out",
@@ -157,7 +157,14 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
             "resume",
         ],
         "_broker" => &["packet", "audit"],
-        _ => return Ok(()),
+        _ => return None,
+    })
+}
+fn validate_review_args(command: &str, args: &Args) -> Result<()> {
+    let common = &["help", "json", "quiet"];
+    let implement = args.positional.first().is_some_and(|v| v == "implement");
+    let Some(specific) = command_options(command, implement) else {
+        return Ok(());
     };
     if command == "delegate" && args.values.contains_key("network") {
         return Err(UsageError("--network is a flag and does not accept a value".into()).into());
@@ -259,6 +266,30 @@ fn print_help(topic: Option<&str>, legacy: Option<&str>) -> Result<()> {
         app.print_long_help()?;
     }
     println!();
+    if let Some(topic) = topic.map(|t| if t == "dispatch" { "review" } else { t }) {
+        for implement in [false, true] {
+            if implement && topic != "delegate" {
+                continue;
+            }
+            let lookup = if topic == "review" { "dispatch" } else { topic };
+            if let Some(options) = command_options(lookup, implement) {
+                let mut list: Vec<String> = Vec::new();
+                for option in options.iter().chain(["json", "quiet"].iter()) {
+                    let flag = format!("--{option}");
+                    if !list.contains(&flag) {
+                        list.push(flag);
+                    }
+                }
+                let label = if implement {
+                    "delegate implement"
+                } else {
+                    topic
+                };
+                println!("{label} 可用参数：{}", list.join(" "));
+            }
+        }
+        println!();
+    }
     if topic == Some("batch") {
         println!(
             "multi-ai batch --jobs jobs.json --outdir results [--pool-limit POOL=N] [--timeout SECONDS] [--resume]\n清单为 {{\"jobs\":[{{\"id\":\"one\",\"prompt_file\":\"task.md\",\"cwd\":\"repo\",\"route\":\"grok-cli\",\"fallback\":[]}}],\"pool_limits\":{{\"xai\":2}}}}；路径相对清单，默认每池并发2。\n每项独立 .md / .md.status.json；仅复用身份与正文哈希一致的完整报告。task_type 为自由字符串；canaries 为 [{{\"match\":\"src/a.rs:10\",\"expect\":\"真问题\"}}]；route:auto 按成绩分配，可用 --only/--exclude 收窄。"

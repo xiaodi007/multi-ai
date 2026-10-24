@@ -107,3 +107,4 @@ CLI 配置身份发现受工作树根和 HOME 约束；cwd 不在 HOME 下时只
 - scorecard 表格新增 MODEL 列与样本不足原因（JSON `assessment_missing`）；缺陷标签读写共用同义表。
 - batch 在 outdir 写 `verdicts.template.tsv`；`feedback --batch` 跳过除 id 外全空的行。
 - 新离线脚本 `backfill-codex-model.py`，默认预演。
+- 子命令 `--help`（及 `help CMD`）列出与参数校验同一张表的可用参数。
