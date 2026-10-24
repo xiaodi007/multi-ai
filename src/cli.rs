@@ -35,6 +35,8 @@ fn validate_review_args(command: &str, args: &Args) -> Result<()> {
             "resume",
             "source-id",
             "task-type",
+            "preflight",
+            "preflight-timeout",
         ],
         "run" => &[
             "prompt-file",
@@ -184,7 +186,7 @@ fn help_app() -> Command {
         ("run", "指定通路；--timeout 单位秒"),
         (
             "batch",
-            "批量任务；--jobs FILE --outdir DIR --pool-limit POOL=N；--resume",
+            "批量任务；--jobs FILE --outdir DIR --pool-limit POOL=N；--resume；--preflight 先探测通路，坏通路本批跳过",
         ),
         (
             "pack",

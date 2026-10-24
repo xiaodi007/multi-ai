@@ -43,6 +43,53 @@ fn relative(base: &Path, path: &Path) -> PathBuf {
         base.join(path)
     }
 }
+/// Definite route failures; timeout, transport and rate_limit may be transient and stay in.
+const PREFLIGHT_FATAL: &[&str] = &[
+    "model", "auth", "quota", "cooldown", "capacity", "error", "empty",
+];
+/// One tiny call per distinct route before any job, so a dead route (rejected model id,
+/// arrears, logged out) is skipped instead of failing minutes into each job.
+async fn preflight(config: &Config, ids: &[String], args: &Args) -> Result<HashMap<String, Value>> {
+    let routes = ids
+        .iter()
+        .map(|id| config.route(id, false))
+        .collect::<Result<Vec<_>>>()?;
+    let temp = crate::runtime::state_dir()
+        .join("probe")
+        .join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&temp)?;
+    let mut probe = Args::default();
+    probe.set("cwd", temp.display());
+    probe.set("timeout", args.get("preflight-timeout").unwrap_or("90"));
+    probe.flags.insert("text-ready".into());
+    let ctx = OutputContext::new(&probe, "preflight", false)?;
+    let mut pending: FuturesUnordered<_> = routes
+        .iter()
+        .map(|r| review::run_one(config, r, &probe, "只回复两个字：正常", &ctx, false))
+        .collect();
+    let mut failed = HashMap::new();
+    while let Some(result) = pending.next().await {
+        let mut result = review::without_output(&result?);
+        let status = result["status"].as_str().unwrap_or("error").to_owned();
+        let route = result["route"].as_str().unwrap_or("-").to_owned();
+        if PREFLIGHT_FATAL.contains(&status.as_str()) {
+            eprintln!(
+                "preflight: skip {route} for this batch: {status} {}",
+                result["error"].as_str().unwrap_or("")
+            );
+            result["preflight"] = json!(true);
+            result["error"] = json!(format!(
+                "preflight: {}",
+                result["error"].as_str().unwrap_or(&status)
+            ));
+            failed.insert(route, result);
+        }
+    }
+    drop(pending);
+    ctx.finish(0)?;
+    let _ = fs::remove_dir_all(&temp);
+    Ok(failed)
+}
 fn cancelled(route: &str) -> Value {
     json!({"route":route,"status":"cancelled","complete":false,"model_calls":0,"error":"batch cancelled before adapter invocation"})
 }
@@ -227,6 +274,20 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
     }
     args.get("outdir").context("batch requires --outdir DIR")?;
     let ctx = OutputContext::new(args, "batch", true)?;
+    let unavailable = if args.has("preflight") {
+        let mut routes = Vec::new();
+        for (job, _, _) in &prepared {
+            for id in std::iter::once(&job.route).chain(job.fallback.iter()) {
+                if !routes.contains(id) {
+                    routes.push(id.clone());
+                }
+            }
+        }
+        preflight(config, &routes, args).await?
+    } else {
+        HashMap::new()
+    };
+    let unavailable = &unavailable;
     // Preflight every job before the first adapter invocation.
     let mut work = Vec::new();
     for (job, options, prompt) in prepared {
@@ -277,7 +338,21 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
                         result
                     });
                 }
-                let mut history = Vec::new();
+                // Routes that failed preflight are skipped but stay visible in the chain.
+                let mut history: Vec<Value> = routes
+                    .iter()
+                    .filter_map(|r| unavailable.get(&r.id).cloned())
+                    .collect();
+                let routes: Vec<_> = routes
+                    .into_iter()
+                    .filter(|r| !unavailable.contains_key(&r.id))
+                    .collect();
+                if routes.is_empty() {
+                    let mut result = history[0].clone();
+                    result["model_calls"] = json!(0);
+                    result["route_attempts"] = json!(history);
+                    return Ok(result);
+                }
                 let mut result = json!({});
                 let mut started: Option<std::time::Instant> = None;
                 for route in &routes {

@@ -737,7 +737,17 @@ async fn execute(
     let boundary_after = boundary_snapshot(cwd, &boundary_before.roots, &attempt.dir, since);
     let changes = boundary_changes(&boundary_before, &boundary_after);
     let events = edit_events(&attempt.dir.join("stdout.raw"), cwd);
-    let buckets = classify_changes(&changes, &boundary_after.roots);
+    let mut buckets = classify_changes(&changes, &boundary_after.roots);
+    // Both controlled sandboxes (Codex workspace-write, Claude restricted) write only to cwd
+    // and temp dirs. Config changes the delegate cannot reach are concurrent host edits:
+    // keep them visible as a warning instead of failing the implementation.
+    let (reachable, unreachable): (Vec<_>, Vec<_>) = buckets
+        .remove("claude_config")
+        .unwrap_or_default()
+        .into_iter()
+        .partition(|path| sandbox_writable(path, cwd));
+    buckets.insert("claude_config".into(), reachable);
+    buckets.insert("claude_config_outside_sandbox".into(), unreachable);
     let mut violations = events.outside.clone();
     violations.extend(buckets.get("claude_config").into_iter().flatten().cloned());
     violations.sort();
@@ -953,6 +963,27 @@ fn edit_events(path: &Path, cwd: &Path) -> EditEvents {
     result.outside.sort();
     result.outside.dedup();
     result
+}
+/// Whether the delegate's sandbox could have written `path` (directly or via a symlink).
+fn sandbox_writable(path: &Path, cwd: &Path) -> bool {
+    let resolve = |path: &Path| {
+        path.ancestors()
+            .find_map(|ancestor| {
+                fs::canonicalize(ancestor)
+                    .ok()
+                    .map(|real| real.join(path.strip_prefix(ancestor).unwrap()))
+            })
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+    let resolved = resolve(path);
+    [
+        cwd.to_path_buf(),
+        PathBuf::from("/tmp"),
+        std::env::temp_dir(),
+    ]
+    .iter()
+    .flat_map(|root| [root.clone(), resolve(root)])
+    .any(|root| path.starts_with(&root) || resolved.starts_with(&root))
 }
 fn classify_changes(
     changes: &[PathBuf],

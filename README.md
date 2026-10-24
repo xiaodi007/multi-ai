@@ -188,13 +188,15 @@ multi-ai feedback --run RUN-UUID --report ATTEMPT-ID \
 ```sh
 multi-ai batch --jobs jobs.json --outdir results --timeout 1800 \
   --pool-limit xai=2 --rate-limit-retries 2 --retry-delay-ms 500
-multi-ai batch --jobs jobs.json --outdir results --timeout 1800 --resume
+multi-ai batch --jobs jobs.json --outdir results --timeout 1800 --resume --preflight
 multi-ai run kimi-k3-cli --fallback grok-cli --prompt-file brief.md --out answer.md
 multi-ai stats
 multi-ai stats --json
 ```
 
 每个额度池默认并发 2，清单或重复的 `--pool-limit POOL=N` 可覆盖。首选与备选均须明确列入清单，API 任务用 `text_ready: true` 声明 prompt 已含全部材料。quota 立即切到备选，池冷却期间后续任务跳过该池；5 小时用量错误在未提供重置时刻时保守冷却 5 小时。rate-limit（包括 429 code 1302）先按指数退避重试，CLI 默认额外重试 2 次、初始延迟 500 毫秒；原生 API 使用其已有重试机制，初始延迟 1000 毫秒，`--rate-limit-retries` 可覆盖次数，`--retry-delay-ms` 仅控制 CLI。重试、退避和备援共用每项的秒单位 `--timeout`；排队等待首个额度池不消耗预算。其他失败保留独立状态，退出码非零不妨碍其余任务完成。取消整个批次会停止排队任务并清理正在运行的 CLI 进程组，不再启动备援或新任务。
+
+`--preflight` 在任何任务开跑前，对清单里出现的每条通路（含备选）各发一次极短探针（单独记为 `preflight` 运行，`--preflight-timeout` 默认 90 秒）。探针结果为 `model`、`auth`、`quota`、`cooldown`、`capacity`、`error`、`empty` 的通路本批跳过：有备选的任务直接从备选开始，`route_attempts` 首项带 `preflight: true` 记录跳过原因；没有可用通路的任务不发调用，以探针状态结束（`model_calls=0`）。`timeout`、`transport`、`rate_limit` 可能是暂时的，不剔除。长任务批次、无人值守或刚换模型 id 后建议打开。
 
 `--resume` 继续使用完整身份和正文哈希校验；成功备选也能直接恢复，未知模型身份仍重新执行。非 Git 任务用清单的 `source_id` 或全局 `--source-id` 标识真实材料版本。修改输入、模型、代码或策略身份后会重新请求，不保证“只看 id 跳过”。失败不替换上一份完整正文，须结合本轮 status 阅读。
 
@@ -252,7 +254,7 @@ multi-ai delegate implement codex-cli \
 
 运行前后记录 HEAD、`git status --porcelain` 和 Git 可见文件身份。默认只通过 `git worktree list` 扫描所属仓的注册工作树、共享 Git 元数据、`~/.agents` 和 Claude 配置（skills、settings*.json、CLAUDE.md），不遍历父目录所有兄弟仓。可重复 `--watch PATH` 追加范围。保留构建目录、会话目录剪枝和并发受管工作树排除；快照记录叶条目数及 `elapsed_ms`，内部符号链接不递归跟随。
 
-Codex JSONL 的 `item.completed` / `file_change` / `changes[].path` 用于编辑归因：解析后的目标在 cwd 外即为归因越界，包括经符号链接指向外部的目标。快照差异分为 `git_ignored`、`git_internal`（.git 下除 config/hooks）、`nested_worktree`、`sibling_worktree_tracked`、`claude_config`（含 .agents）与 `other`。只有归因越界和 Claude 配置变化判 `boundary_violation`，不回滚。其余进入 `boundary_warnings`，执行完整成功时继续使用兼容状态 **`status=ok, complete=true, exitCode=0`**。警告表示观测到外部变化，不代表由实施方造成，也不证明没有其它写入。事件流缺失、损坏或未正常结束时标 `attribution=unavailable`，快照继续按上述规则核对。shell 命令事件不提供可靠写入目标，不能从其命令文本猜测归因。
+Codex JSONL 的 `item.completed` / `file_change` / `changes[].path` 用于编辑归因：解析后的目标在 cwd 外即为归因越界，包括经符号链接指向外部的目标。快照差异分为 `git_ignored`、`git_internal`（.git 下除 config/hooks）、`nested_worktree`、`sibling_worktree_tracked`、`claude_config`（含 .agents）与 `other`。只有归因越界和沙箱可写到的 Claude 配置变化判 `boundary_violation`，不回滚。受控沙箱（Codex workspace-write、Claude 壳 restricted）只能写 cwd、`/tmp` 与 `TMPDIR`：解析符号链接后不在这些位置的 Claude 配置变化视为宿主并发修改，进 `boundary_warnings.claude_config_outside_sandbox`，不判失败。其余进入 `boundary_warnings`，执行完整成功时继续使用兼容状态 **`status=ok, complete=true, exitCode=0`**。警告表示观测到外部变化，不代表由实施方造成，也不证明没有其它写入。事件流缺失、损坏或未正常结束时标 `attribution=unavailable`，快照继续按上述规则核对。shell 命令事件不提供可靠写入目标，不能从其命令文本猜测归因。
 
 status 每桶保存计数和最多 20 条样例，`boundary_violations` 也最多 20 条；完整差异和归因路径位于 `boundary_details` 指向的 artifacts/boundary-changes.json。完整摘要原子发布并登记为 run/attempt 报告，包括归因越界或 Claude 配置越界时的诊断摘要；此时保留非零退出、`complete=false`。`summary_published` 表示本轮是否发布，`summary_kind=final|diagnostic` 区分正式和诊断摘要。执行失败、超时或空正文继续保留上一份完整摘要。快照看不到网络写入、监测范围外或两次扫描间已恢复的变化。正常收尾的 stderr 最后一行固定为 `multi-ai: status=<status> exit=<code> run=<run_id> attempt=<attempt_id>`。
 

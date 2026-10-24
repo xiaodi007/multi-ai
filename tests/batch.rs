@@ -256,3 +256,77 @@ fn http_quota_and_rate_limit_are_distinct() {
     );
     assert_eq!(http_error_code(403, "forbidden"), "auth");
 }
+
+#[test]
+fn preflight_skips_a_route_whose_model_is_rejected_before_any_job_runs() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path();
+    fs::create_dir(root.join("config")).unwrap();
+    fs::write(
+        root.join("dead.sh"),
+        format!("echo call >> '{}/dead-calls'\necho '[claude-code:unrecognized_model] {{\"model\":\"gone\"}}' >&2\nexit 1\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        root.join("ok.sh"),
+        format!(
+            "echo call >> '{}/ok-calls'\nprintf 'complete %s' \"$1\"\n",
+            root.display()
+        ),
+    )
+    .unwrap();
+    let route = |id: &str, script: &str, rank: u32| json!({"id":id,"legacy_id":id,"pool":id,"family":"test","label":id,"agentic":true,"cost":"sub","rank":rank,"argv":["/bin/sh",root.join(script),"{prompt}"],"extract":"stdout","default_timeout":10});
+    fs::write(
+        root.join("config/routes.json"),
+        serde_json::to_vec(&json!([
+            route("dead", "dead.sh", 1),
+            route("ok", "ok.sh", 2)
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let jobs = (0..3)
+        .map(|n| {
+            fs::write(root.join(format!("p{n}")), format!("job-{n}")).unwrap();
+            json!({"id":format!("j{n}"),"prompt_file":format!("p{n}"),"cwd":".","route":"dead","fallback":["ok"]})
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        root.join("jobs.json"),
+        serde_json::to_vec(&json!({"jobs":jobs})).unwrap(),
+    )
+    .unwrap();
+    let out = run(root, &["--preflight"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = |name: &str| {
+        fs::read_to_string(root.join(name))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    // One preflight call per route; jobs never invoke the dead route.
+    assert_eq!(calls("dead-calls"), 1);
+    assert_eq!(calls("ok-calls"), 4);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    for row in report["results"].as_array().unwrap() {
+        assert_eq!(row["status"], "ok", "{row}");
+        assert_eq!(row["route"], "ok", "{row}");
+        assert_eq!(row["route_attempts"][0]["status"], "model", "{row}");
+        assert_eq!(row["route_attempts"][0]["preflight"], true, "{row}");
+    }
+    assert!(String::from_utf8_lossy(&out.stderr).contains("preflight: skip dead"));
+    // Without a fallback, a job on a dead route reports the preflight failure, not a call.
+    let jobs = json!({"jobs":[{"id":"solo","prompt_file":"p0","cwd":".","route":"dead"}]});
+    fs::write(root.join("jobs.json"), serde_json::to_vec(&jobs).unwrap()).unwrap();
+    fs::remove_dir_all(root.join("out")).unwrap();
+    let out = run(root, &["--preflight"]);
+    assert!(!out.status.success());
+    assert_eq!(calls("dead-calls"), 2);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["results"][0]["status"], "model");
+    assert_eq!(report["results"][0]["model_calls"], 0);
+}

@@ -89,7 +89,7 @@ CLI 身份检查在 cwd 位于 HOME 内时，祖先配置发现到 HOME 为止�
 
 本机离线检查：codex-cli **0.163.0** 的 `exec --help` 确认 `--json` 输出 JSONL；安装二进制内的 exec 序列化字面量确认 `thread.started`、`turn.started`、`turn.completed`、`item.completed`、`file_change`、`changes`、`path`、`add/delete/update`。解析支持 `item.completed` 的 `item.type=file_change`、`item.changes[].path`（绝对或相对 cwd）、`kind`、`item.status`。thread.started 与 turn.completed 完整且无损坏行时 attribution=available；部分流仍保留已经观测到的越界编辑证据，并标 unavailable。已用假 Codex 合成流验证，**本轮遵守“不运行其他实施器”，未启动真实 exec 会话，真实事件形状尚需宿主安装后验证**。真实流未必带 model；此时使用共用配置解析器，取不到保持 unknown。
 
-边界默认范围为 git worktree list 的注册工作树、共享元数据和指定配置路径，可重复 --watch。git_ignored 使用所属仓 git check-ignore（批量 NUL 路径），git_internal 除 config/hooks，nested_worktree 包括嵌入的 .claude/worktrees；只有归因越界与 claude_config（含旧 .agents 保护）拒绝通过。配置根为符号链接时也扫描解析后的根；内部链接只看链接本身。快照 entries/elapsed_ms 记录规模和耗时，stderr 统一收尾行见 README。缺流时仅快照警告不能当作成功归因证明。
+边界默认范围为 git worktree list 的注册工作树、共享元数据和指定配置路径，可重复 --watch。git_ignored 使用所属仓 git check-ignore（批量 NUL 路径），git_internal 除 config/hooks，nested_worktree 包括嵌入的 .claude/worktrees；只有归因越界与 claude_config（含旧 .agents 保护）拒绝通过；2026-10-24 起 claude_config 只含沙箱可写到（cwd、/tmp、TMPDIR，解析符号链接后）的变化，其余记 claude_config_outside_sandbox 警告。配置根为符号链接时也扫描解析后的根；内部链接只看链接本身。快照 entries/elapsed_ms 记录规模和耗时，stderr 统一收尾行见 README。缺流时仅快照警告不能当作成功归因证明。
 
 实施字段：--outcome merged|merged-after-rework|discarded、--rework-items N、--rework-rounds N、--defect-tags tag1,tag2；TSV 可选列为 outcome/rework_items/rework_rounds/defect_tags/screen_min/rework_min。旧反馈字段和追加更正规则不变；未知数留空，source=agent，human 仍需用户明确决定。实施成绩单不给 precision，以实际 outcome 和返工数据选路，归因和警告均不进入执行失败率；底层同时失败时仍按执行原因计入。旧缺字段记录照常可读；不同历史 model 单列，未知模型不按当前配置填充。旧记录离线重判脚本、严格判据和恢复限制见 [README](../README.md#实施反馈与旧记录重判2026-10-21)，发布包附 reclassify-implement.py。
 

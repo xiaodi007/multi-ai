@@ -15,7 +15,7 @@ impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().join("worktree");
-        for directory in ["worktree", "sibling", "bin", "config", "home"] {
+        for directory in ["worktree", "sibling", "bin", "config", "home", "tmp"] {
             fs::create_dir(temp.path().join(directory)).unwrap();
         }
         let f = Self { temp, cwd };
@@ -111,12 +111,25 @@ done
             .env("MULTI_AI_CONFIG_DIR", self.path("config"))
             .env("MULTI_AI_STATE_DIR", self.path("state"))
             .env("FAKE_ROOT", self.temp.path())
+            // The fixture lives in the system temp dir; a dedicated TMPDIR keeps the fixture
+            // HOME outside what the implementation sandbox could write.
+            .env("TMPDIR", self.path("tmp"))
             .current_dir(self.temp.path());
         cmd
     }
     fn run(&self, extra: &[&str]) -> Output {
-        self.cmd()
-            .args(["delegate", "implement", "codex-cli", "--cwd"])
+        self.run_env(extra, &[])
+    }
+    /// TMPDIR covering the fixture root makes HOME writable from the sandbox's view.
+    fn run_reachable_home(&self, extra: &[&str]) -> Output {
+        self.run_env(extra, &[("TMPDIR", self.path(""))])
+    }
+    fn run_env(&self, extra: &[&str], envs: &[(&str, PathBuf)]) -> Output {
+        let mut cmd = self.cmd();
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+        cmd.args(["delegate", "implement", "codex-cli", "--cwd"])
             .arg(&self.cwd)
             .arg("--prompt-file")
             .arg(self.path("brief.md"))
@@ -335,14 +348,12 @@ printf 'implementation finished' > "$out"
 "#,
     );
     let out = f.run(&[]);
-    f.assert_boundary(
-        &out,
-        &[
-            "sibling/nested/keep",
-            "home/.claude/skills/custom/keep",
-            "home/.claude/skills/custom/created",
-            "home/.agents/nested/remove",
-        ],
+    // The attributed sibling edit fails the run; config the sandbox cannot reach only warns.
+    let status = f.assert_boundary(&out, &["sibling/nested/keep"]);
+    assert_eq!(status["boundary_violation_count"], 1, "{status}");
+    assert_eq!(
+        status["boundary_warnings"]["claude_config_outside_sandbox"]["count"], 3,
+        "{status}"
     );
     assert_eq!(
         fs::read_to_string(f.path("sibling/nested/keep")).unwrap(),
@@ -369,7 +380,7 @@ printf created > "$HOME/.agents/nested/created"
 printf 'implementation finished' > "$out"
 "#,
     );
-    let out = f.run(&[]);
+    let out = f.run_reachable_home(&[]);
     f.assert_boundary(
         &out,
         &[
@@ -505,7 +516,7 @@ fn public_summary_inside_monitored_sibling_excludes_only_current_attempt_artifac
 }
 
 #[test]
-fn host_sessions_and_build_caches_do_not_trigger_boundary_but_settings_do() {
+fn host_sessions_and_build_caches_do_not_trigger_boundary_but_reachable_settings_do() {
     let f = Fixture::new();
     f.fake(r#"mkdir -p "$HOME/.claude/projects" "$HOME/.claude/sessions" "$HOME/.claude/skills/synced" "$FAKE_ROOT/sibling/node_modules" "$FAKE_ROOT/sibling/target" "$FAKE_ROOT/sibling/dist" "$FAKE_ROOT/sibling/.git/objects/cache"
 printf x > "$HOME/.claude/projects/log.jsonl"
@@ -527,8 +538,22 @@ printf 'implementation finished' > "$out"
     f.fake(
         "printf x > \"$HOME/.claude/settings.json\"\nprintf 'implementation finished' > \"$out\"\n",
     );
-    let out = f.run(&[]);
+    let out = f.run_reachable_home(&[]);
     f.assert_boundary(&out, &["home/.claude/settings.json"]);
+    // The same change outside the sandbox's writable roots is a concurrent host edit.
+    let out = f.run(&[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let status = f.status();
+    assert_eq!(status["status"], "ok", "{status}");
+    assert_eq!(
+        status["boundary_warnings"]["claude_config_outside_sandbox"]["samples"][0],
+        json!(f.path("home/.claude/settings.json"))
+    );
+    assert_eq!(status["boundary_buckets"]["claude_config"]["count"], 0);
 }
 #[test]
 fn concurrent_implementations_exclude_overlapping_intervals_even_after_peer_finishes() {
@@ -826,7 +851,7 @@ fn explicit_watch_is_warning_without_events_and_batch_implementation_feedback_wo
 fn legacy_offline_reclassification_registers_report_and_preserves_evidence() {
     let f = Fixture::new();
     f.fake("printf changed > \"$HOME/.claude/skills/custom/keep\"\nprintf 'implementation finished' > \"$out\"\n");
-    assert!(!f.run(&[]).status.success());
+    assert!(!f.run_reachable_home(&[]).status.success());
     let mut status = f.status();
     let run = status["run_id"].as_str().unwrap().to_owned();
     let attempt = status["attempt_id"].as_str().unwrap().to_owned();
@@ -948,9 +973,17 @@ fn nested_worktree_changes_warn_and_linked_claude_configuration_remains_protecte
     fs::rename(f.path("home/.claude/skills"), f.path("linked-skills")).unwrap();
     std::os::unix::fs::symlink(f.path("linked-skills"), f.path("home/.claude/skills")).unwrap();
     f.fake("printf changed > \"$HOME/.claude/skills/custom/keep\"\nprintf 'implementation finished' > \"$out\"\n");
-    let out = f.run(&[]);
+    let out = f.run_reachable_home(&[]);
     let status = f.assert_boundary(&out, &["linked-skills/custom/keep"]);
     assert_eq!(status["boundary_buckets"]["claude_config"]["count"], 1);
+    // A linked target outside the sandbox's writable roots is still classified, as a warning.
+    let out = f.run(&[]);
+    assert!(out.status.success());
+    let status = f.status();
+    assert_eq!(
+        status["boundary_warnings"]["claude_config_outside_sandbox"]["count"], 1,
+        "{status}"
+    );
 }
 
 // Minimal replay: no repository documents or real credentials are retained.

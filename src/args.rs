@@ -16,6 +16,7 @@ impl Args {
             "quiet",
             "text-ready",
             "resume",
+            "preflight",
             "no-metered",
             "no-quota",
             "dry-run",
