@@ -47,6 +47,24 @@ fn relative(base: &Path, path: &Path) -> PathBuf {
 const PREFLIGHT_FATAL: &[&str] = &[
     "model", "auth", "quota", "cooldown", "capacity", "error", "empty",
 ];
+pub(crate) const PREFLIGHT_PROMPT: &str = "只回复两个字：正常";
+/// Some(marked result) when a probe result means the route is unusable now.
+pub(crate) fn preflight_failure(result: &Value) -> Option<Value> {
+    let mut result = review::without_output(result);
+    let status = result["status"].as_str().unwrap_or("error").to_owned();
+    if !PREFLIGHT_FATAL.contains(&status.as_str()) {
+        return None;
+    }
+    result["preflight"] = json!(true);
+    result["error"] = json!(format!(
+        "preflight: {}",
+        result["error"]
+            .as_str()
+            .filter(|e| !e.is_empty())
+            .unwrap_or(&status)
+    ));
+    Some(result)
+}
 /// One tiny call per distinct route before any job, so a dead route (rejected model id,
 /// arrears, logged out) is skipped instead of failing minutes into each job.
 async fn preflight(config: &Config, ids: &[String], args: &Args) -> Result<HashMap<String, Value>> {
@@ -65,23 +83,17 @@ async fn preflight(config: &Config, ids: &[String], args: &Args) -> Result<HashM
     let ctx = OutputContext::new(&probe, "preflight", false)?;
     let mut pending: FuturesUnordered<_> = routes
         .iter()
-        .map(|r| review::run_one(config, r, &probe, "只回复两个字：正常", &ctx, false))
+        .map(|r| review::run_one(config, r, &probe, PREFLIGHT_PROMPT, &ctx, false))
         .collect();
     let mut failed = HashMap::new();
     while let Some(result) = pending.next().await {
-        let mut result = review::without_output(&result?);
-        let status = result["status"].as_str().unwrap_or("error").to_owned();
-        let route = result["route"].as_str().unwrap_or("-").to_owned();
-        if PREFLIGHT_FATAL.contains(&status.as_str()) {
+        if let Some(result) = preflight_failure(&result?) {
+            let route = result["route"].as_str().unwrap_or("-").to_owned();
             eprintln!(
-                "preflight: skip {route} for this batch: {status} {}",
+                "preflight: skip {route} for this batch: {} {}",
+                result["status"].as_str().unwrap_or("error"),
                 result["error"].as_str().unwrap_or("")
             );
-            result["preflight"] = json!(true);
-            result["error"] = json!(format!(
-                "preflight: {}",
-                result["error"].as_str().unwrap_or(&status)
-            ));
             failed.insert(route, result);
         }
     }
@@ -89,6 +101,50 @@ async fn preflight(config: &Config, ids: &[String], args: &Args) -> Result<HashM
     ctx.finish(0)?;
     let _ = fs::remove_dir_all(&temp);
     Ok(failed)
+}
+/// Pre-filled `feedback --batch` TSV: one row per job with a bound report, so recording
+/// host verdicts is filling numbers instead of looking up run/attempt ids.
+fn write_verdict_template(ctx: &OutputContext, results: &[Value]) -> Result<()> {
+    let Some(outdir) = &ctx.outdir else {
+        return Ok(());
+    };
+    let reportable: Vec<&Value> = results
+        .iter()
+        .filter(|v| {
+            v["status"] == "ok"
+                || (v["status"] == "boundary_violation"
+                    && v["summary_published"] == true
+                    && v["execution_status"] == "ok")
+        })
+        .collect();
+    if reportable.is_empty() {
+        return Ok(());
+    }
+    let mut header = vec![
+        "id",
+        "accepted",
+        "false_positive",
+        "uncertain",
+        "evidence",
+        "screen_min",
+    ];
+    if reportable.iter().any(|v| v["task_type"] == "implement") {
+        header.extend(["outcome", "rework_items", "rework_rounds", "defect_tags"]);
+    }
+    let mut text = header.join("\t") + "\n";
+    for row in reportable {
+        text.push_str(row["id"].as_str().unwrap_or(""));
+        text.push_str(&"\t".repeat(header.len() - 1));
+        text.push('\n');
+    }
+    let path = outdir.join("verdicts.template.tsv");
+    ctx.publish_to(&path, &text)?;
+    eprintln!(
+        "反馈模板：{}（只填核对过的行，没核对的整行留空）→ multi-ai feedback --batch {} --from 该文件",
+        path.display(),
+        outdir.display()
+    );
+    Ok(())
 }
 fn cancelled(route: &str) -> Value {
     json!({"route":route,"status":"cancelled","complete":false,"model_calls":0,"error":"batch cancelled before adapter invocation"})
@@ -475,6 +531,7 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
         "incomplete"
     };
     ctx.save_status(json!({"status":status,"complete":complete,"results":results}))?;
+    write_verdict_template(&ctx, &results)?;
     let rc = i32::from(!complete);
     ctx.finish(rc)?;
     eprintln!("id\troute\tstatus\tseconds\trun_id\tattempt_id\tcanary\tfallback");

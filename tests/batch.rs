@@ -330,3 +330,62 @@ fn preflight_skips_a_route_whose_model_is_rejected_before_any_job_runs() {
     assert_eq!(report["results"][0]["status"], "model");
     assert_eq!(report["results"][0]["model_calls"], 0);
 }
+
+#[test]
+fn batch_writes_a_verdict_template_and_blank_rows_are_skipped_on_import() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path();
+    fs::create_dir(root.join("config")).unwrap();
+    fs::write(root.join("ok.sh"), "printf 'finding for %s' \"$1\"\n").unwrap();
+    fs::write(
+        root.join("config/routes.json"),
+        serde_json::to_vec(&json!([{"id":"ok","legacy_id":"ok","pool":"ok","family":"test","label":"ok","agentic":true,"cost":"sub","rank":1,"argv":["/bin/sh",root.join("ok.sh"),"{prompt}"],"extract":"stdout","default_timeout":10}])).unwrap(),
+    )
+    .unwrap();
+    let jobs = (0..3)
+        .map(|n| {
+            fs::write(root.join(format!("p{n}")), format!("job-{n}")).unwrap();
+            json!({"id":format!("j{n}"),"prompt_file":format!("p{n}"),"cwd":".","route":"ok","task_type":"review"})
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        root.join("jobs.json"),
+        serde_json::to_vec(&json!({"jobs":jobs})).unwrap(),
+    )
+    .unwrap();
+    let out = run(root, &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("verdicts.template.tsv"));
+    let template = fs::read_to_string(root.join("out/verdicts.template.tsv")).unwrap();
+    let lines: Vec<_> = template.lines().collect();
+    assert_eq!(
+        lines[0],
+        "id\taccepted\tfalse_positive\tuncertain\tevidence\tscreen_min"
+    );
+    assert_eq!(lines[1..], ["j0\t\t\t\t\t", "j1\t\t\t\t\t", "j2\t\t\t\t\t"]);
+    // The host fills only what was reviewed; untouched rows are not an error.
+    let filled = template.replacen("j1\t\t\t\t\t", "j1\t2\t1\t\thost checked\t3", 1);
+    fs::write(root.join("verdicts.tsv"), filled).unwrap();
+    let feedback = Command::new(env!("CARGO_BIN_EXE_multi-ai"))
+        .env_clear()
+        .env("HOME", root)
+        .env("PATH", "/usr/bin:/bin")
+        .env("MULTI_AI_CONFIG_DIR", root.join("config"))
+        .env("MULTI_AI_STATE_DIR", root.join("state"))
+        .current_dir(root)
+        .args(["feedback", "--batch", "out", "--from", "verdicts.tsv"])
+        .output()
+        .unwrap();
+    assert!(
+        feedback.status.success(),
+        "{}",
+        String::from_utf8_lossy(&feedback.stderr)
+    );
+    let written: Value = serde_json::from_slice(&feedback.stdout).unwrap();
+    assert_eq!(written["written"], 1);
+    assert_eq!(written["events"][0]["batch_id"], "j1");
+}

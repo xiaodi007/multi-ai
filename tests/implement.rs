@@ -1116,3 +1116,65 @@ fn claude_shell_implementer_gets_restricted_sandbox_and_git_deny() {
     assert!(!network.status.success());
     assert!(String::from_utf8_lossy(&network.stderr).contains("--network is only supported"));
 }
+
+#[test]
+fn preflight_stops_a_dead_route_before_touching_the_worktree() {
+    let f = Fixture::new();
+    f.preserve_summary();
+    f.fake(
+        r#"if grep -q '只回复两个字' "$FAKE_ROOT/argv"; then
+  echo probe >> "$FAKE_ROOT/probes"
+  echo '[claude-code:unrecognized_model] {"model":"gone"}' >&2
+  exit 1
+fi
+printf changed > tracked.txt
+printf 'implementation finished' > "$out"
+"#,
+    );
+    let out = f.run(&["--preflight"]);
+    assert!(!out.status.success());
+    let status = f.status();
+    assert_eq!(status["status"], "model", "{status}");
+    assert_eq!(status["preflight"]["preflight"], true, "{status}");
+    assert!(status["error"].as_str().unwrap().starts_with("preflight:"));
+    assert_eq!(
+        fs::read_to_string(f.cwd.join("tracked.txt")).unwrap(),
+        "original"
+    );
+    assert_eq!(
+        fs::read_to_string(f.path("probes"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(f.path("summary.md")).unwrap(),
+        "previous complete summary"
+    );
+    // A healthy route passes the probe and then implements as usual.
+    f.fake(
+        r#"if grep -q '只回复两个字' "$FAKE_ROOT/argv"; then echo probe >> "$FAKE_ROOT/probes"; printf '正常' > "$out"; exit 0; fi
+printf changed > tracked.txt
+printf 'implementation finished' > "$out"
+"#,
+    );
+    let out = f.run(&["--preflight"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(f.status()["status"], "ok");
+    assert_eq!(
+        fs::read_to_string(f.cwd.join("tracked.txt")).unwrap(),
+        "changed"
+    );
+    assert_eq!(
+        fs::read_to_string(f.path("probes"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+}

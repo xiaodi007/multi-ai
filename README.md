@@ -75,7 +75,7 @@ gh repo clone xiaodi007/multi-ai
 cd multi-ai
 cargo test --locked
 ./scripts/package.sh
-cd dist/multi-ai-0.2.0-aarch64-apple-darwin
+cd dist/multi-ai-0.2.1-aarch64-apple-darwin
 ./install.sh --no-legacy-aliases
 ./install-skills.sh --upgrade
 ```
@@ -248,6 +248,8 @@ multi-ai delegate implement codex-cli \
   --path-prepend ~/.nvm/versions/node/v24.19.0/bin
 ```
 
+`--preflight` 先用同一可执行、模型和沙箱在空临时目录发一次极短探针（单独记为 `preflight` 运行，`--preflight-timeout` 默认 90 秒）。结果为 `model`、`auth`、`quota`、`cooldown`、`capacity`、`error`、`empty` 时不碰工作树，本次实施以该状态结束（`preflight` 字段带探针结果，`error` 以 `preflight:` 开头）；其他结果照常实施。
+
 `--cwd` 必须是现存 Git 工作树顶层；主工作树和 linked worktree 都支持。默认拒绝任何未提交修改；确需在已有修改上继续时显式加 `--allow-dirty`，已有文件内容会参与前后比较。`--out` 放在工作树之外，避免输出锁与实施目录锁相互冲突。`--path-prepend` 可重复，仅影响子进程 PATH，不修改 shell 配置。`--timeout` 使用秒。
 
 此入口固定调用 `codex exec --json -C <cwd> -s workspace-write --skip-git-repo-check -o <暂存摘要>`，不再套外层 macOS sandbox。默认不额外覆盖 Codex 的网络配置；显式加 `--network` 时追加 `-c sandbox_workspace_write.network_access=true`，status 记录 `network: true`，否则记录 `false`。开启后 Codex 执行的命令能访问任意网络地址（包括远端），事后的 Git/mtime 核对看不到网络写入。建议宿主只在任务书里给本机私有库的连接串；数据库、对象存储由宿主预先启动，实施方连接使用。此入口不提供 `danger-full-access` 选项。写入边界由 Codex 自带的 `workspace-write` 加事后核对负责。仍需在提示中明确授权要读取、修改的材料；写权限限制不等于读取材料范围的自动证明。
@@ -288,6 +290,8 @@ batch 保留 stdout JSON，同时在 stderr 打印 `id、route、status、second
 ```sh
 multi-ai feedback --batch results --from verdicts.tsv
 ```
+
+batch 结束时在 outdir 写 `verdicts.template.tsv`：每个有完整报告的任务一行、id 已填，实施任务另带 outcome 等列。只填核对过的行即可，除 id 外整行为空的行导入时跳过。
 
 TSV 首行为 `id<Tab>accepted<Tab>false_positive<Tab>uncertain<Tab>evidence`，每项一行；未知数量留空，至少一个数量或实施字段已知，evidence 必填。可再加 `screen_min`、`rework_min`（分钟）、`outcome`、`rework_items`、`rework_rounds`、`defect_tags` 列；实施反馈可以把发现数量列留空。默认 source=agent；human 仍需用户明确决定和 `--source human --human-confirmed`。全部行预检通过后才追加；无当前完整报告、正文被修改或不存在的 id 会拒绝整次导入；已登记的完整越界诊断摘要也可录入。更正继续追加，成绩单对同份报告每个字段取最后一个已知值，不把更正重复相加。缓存上的反馈归回原始调用，避免恢复次数虚增成绩。
 

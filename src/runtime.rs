@@ -1008,6 +1008,10 @@ fn batch_feedback(args: &Args) -> Result<i32> {
         {
             bail!("invalid or duplicate TSV row {}", index + 2);
         }
+        // A template row the host has not reviewed yet: nothing to record.
+        if fields[1..].iter().all(|v| v.trim().is_empty()) {
+            continue;
+        }
         let id = fields[0];
         let status: Value =
             serde_json::from_slice(&fs::read(directory.join(format!("{id}.md.status.json")))?)?;

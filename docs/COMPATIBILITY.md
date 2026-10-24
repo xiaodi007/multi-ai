@@ -94,3 +94,16 @@ CLI 身份检查在 cwd 位于 HOME 内时，祖先配置发现到 HOME 为止�
 实施字段：--outcome merged|merged-after-rework|discarded、--rework-items N、--rework-rounds N、--defect-tags tag1,tag2；TSV 可选列为 outcome/rework_items/rework_rounds/defect_tags/screen_min/rework_min。旧反馈字段和追加更正规则不变；未知数留空，source=agent，human 仍需用户明确决定。实施成绩单不给 precision，以实际 outcome 和返工数据选路，归因和警告均不进入执行失败率；底层同时失败时仍按执行原因计入。旧缺字段记录照常可读；不同历史 model 单列，未知模型不按当前配置填充。旧记录离线重判脚本、严格判据和恢复限制见 [README](../README.md#实施反馈与旧记录重判2026-10-21)，发布包附 reclassify-implement.py。
 
 CLI 配置身份发现受工作树根和 HOME 约束；cwd 不在 HOME 下时只发现 cwd 项目配置和显式用户配置，避免隔离 HOME 的夹具继承其外侧宿主配置。多个配置模型冲突时保守 unknown，routes 展示与执行使用同一解析器。
+
+# v0.2.1 增量（2026-10-24）
+
+不改既有输出语义与单位；新增均为可选开关或新字段。
+
+- 失败分类新增 `model`（通路模型 id 被拒），不写池冷却，run/batch 视同可备援。
+- batch 与 delegate implement 新增 `--preflight` / `--preflight-timeout`；默认关闭，行为与 0.2.0 一致。
+- 实施边界：沙箱写不到的 Claude 配置变化改记 `boundary_warnings.claude_config_outside_sandbox`，不再判 `boundary_violation`。
+- 运行目录新增 `alive.lock`，manifest 新增 `pid`；stats/scorecard 把进程已不在的未结束运行记 `lost`。
+- 无 `--out` 的运行结束时 manifest `current_status` 不再停在 `running`。
+- scorecard 表格新增 MODEL 列与样本不足原因（JSON `assessment_missing`）；缺陷标签读写共用同义表。
+- batch 在 outdir 写 `verdicts.template.tsv`；`feedback --batch` 跳过除 id 外全空的行。
+- 新离线脚本 `backfill-codex-model.py`，默认预演。

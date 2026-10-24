@@ -436,6 +436,43 @@ fn controlled_route(route: &Route, codex: &Path, cwd: &Path, network: bool) -> R
     controlled.extract = "last-message-file".into();
     controlled
 }
+/// Same executable, model and sandbox as the real run, in an empty temp dir and its own
+/// `preflight` run record: a dead route fails in seconds, before the worktree is touched.
+async fn preflight(
+    config: &Config,
+    route: &Route,
+    executable: &Path,
+    shell: bool,
+    args: &Args,
+) -> Result<Option<Value>> {
+    let temp = runtime::state_dir()
+        .join("probe")
+        .join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&temp)?;
+    let temp = fs::canonicalize(&temp)?;
+    let probe_route = if shell {
+        claude_controlled_route(route, executable, &temp)
+    } else {
+        controlled_route(route, executable, &temp, false)
+    };
+    let mut probe = Args::default();
+    probe.set("cwd", temp.display());
+    probe.set("timeout", args.get("preflight-timeout").unwrap_or("90"));
+    probe.flags.insert("text-ready".into());
+    let ctx = OutputContext::new(&probe, "preflight", false)?;
+    let result = review::run_one(
+        config,
+        &probe_route,
+        &probe,
+        crate::batch::PREFLIGHT_PROMPT,
+        &ctx,
+        false,
+    )
+    .await;
+    ctx.finish(0)?;
+    let _ = fs::remove_dir_all(&temp);
+    Ok(crate::batch::preflight_failure(&result?))
+}
 /// Claude Code shell equivalent of Codex workspace-write: --restricted confines file tools
 /// to cwd and refuses bypassPermissions and unattended git/settings writes; Bash runs only
 /// inside the Claude Code OS sandbox (no unsandboxed fallback, default network policy).
@@ -688,6 +725,16 @@ async fn execute(
         ));
         return Ok(result);
     };
+    if args.has("preflight")
+        && let Some(failure) = preflight(&config, &route, &executable, shell, args).await?
+    {
+        let mut result = base;
+        result["status"] = failure["status"].clone();
+        result["error"] = failure["error"].clone();
+        result["complete"] = json!(false);
+        result["preflight"] = failure;
+        return Ok(result);
+    }
     attempt.write("last-message.txt", b"")?;
     route = if shell {
         claude_controlled_route(&route, &executable, cwd)
