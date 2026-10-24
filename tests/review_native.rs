@@ -112,6 +112,20 @@ fn classification_keeps_context_and_echo_out_of_cooldown() {
     assert_eq!(classify("Please log in; 401", 1, false, ""), "auth");
     assert_eq!(classify("quota exhausted", 1, false, ""), "quota");
     assert_eq!(classify("connection reset", 1, false, ""), "transport");
+    assert_eq!(
+        classify(
+            r#"[claude-code:unrecognized_model] {"model":"deepseek-v4-pro"}"#,
+            1,
+            false,
+            ""
+        ),
+        "model"
+    );
+    assert_eq!(
+        classify("The model `kimi-x` does not exist", 1, false, ""),
+        "model"
+    );
+    assert_eq!(classify("file does not exist", 1, false, ""), "error");
     assert_eq!(classify("429", 0, false, ""), "ok");
     assert_eq!(classify("401", 1, true, ""), "timeout");
 }

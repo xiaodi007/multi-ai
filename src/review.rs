@@ -372,6 +372,12 @@ pub fn classify(text: &str, rc: i32, timed_out: bool, prompt: &str) -> String {
             r"(?i)context (length|window|size)|maximum context|too many tokens|input .{0,20}too long|prompt is too long|上下文(长度|过长|超限)|输入过长",
         ),
         (
+            // The route's configured model id was rejected (e.g. Claude Code's
+            // `[claude-code:unrecognized_model]`). Route-specific: fail over, no pool cooldown.
+            "model",
+            r"(?i)unrecognized_model|model_not_found|model[ _]not[ _]found|model\b.{0,60}\bdoes not exist|模型不存在",
+        ),
+        (
             "quota",
             r"(?i)402|quota[_ ](exceeded|exhausted)|insufficient[_ ](balance|quota|credit)|exceeded.{0,40}quota|usage limit|余额不足|额度(不足|用尽|超限)|限额",
         ),
@@ -1734,7 +1740,7 @@ pub async fn command(config: &Config, command: &str, args: &Args, legacy: bool) 
                 remaining.set("timeout", seconds);
                 v = run_retry(config, candidate, &remaining, &prompt, &ctx, legacy).await?;
                 history.push(without_output(&v));
-                if !matches!(s(&v, "status"), "quota" | "cooldown" | "capacity") {
+                if !matches!(s(&v, "status"), "quota" | "cooldown" | "capacity" | "model") {
                     break;
                 }
             }

@@ -441,7 +441,7 @@ pub fn command(args: &Args) -> Result<i32> {
             .any(|c| c["task_type"] != "implement")
         {
             runtime::stdout_line(format_args!(
-                "ROUTE\tTASK TYPE\tN\tPRECISION\tCANARY\tMEDIAN s\tP90 s\tFAIL RATE (quota/rate/capacity/timeout)\tEXT s/accepted\tHOST min/accepted\tASSESSMENT"
+                "ROUTE\tTASK TYPE\tMODEL\tN\tPRECISION\tCANARY\tMEDIAN s\tP90 s\tFAIL RATE (quota/rate/capacity/timeout)\tEXT s/accepted\tHOST min/accepted\tASSESSMENT"
             ))?;
         }
         let metric = |v: &Value| v.as_f64().map_or_else(|| "-".into(), |n| format!("{n:.3}"));
@@ -468,9 +468,11 @@ pub fn command(args: &Args) -> Result<i32> {
                 continue;
             }
             runtime::stdout_line(format_args!(
-                "{}\t{}\t{}\t{}\t{}/{}\t{}\t{}\t{} ({}/{}/{}/{})\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}/{}\t{}\t{}\t{} ({}/{}/{}/{})\t{}\t{}\t{}",
                 row["route"].as_str().unwrap(),
                 row["task_type"].as_str().unwrap_or("-"),
+                // Cells are keyed by model too; without it same-route rows look duplicated.
+                row["model"].as_str().unwrap_or("-"),
                 row["sample_count"],
                 metric(&row["precision"]),
                 row["canary_hits"],

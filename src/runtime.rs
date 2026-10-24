@@ -548,11 +548,17 @@ impl OutputContext {
             manifest["finished_at"] = json!(Utc::now().to_rfc3339());
         }
         self.save_manifest()?;
-        if let Some(path) = &self.status_path {
-            let mut value = fs::read_to_string(path)
+        // Without --out there is no status file, but the manifest's current_status
+        // must still leave "running" (probe runs used to stay running forever).
+        let previous = match &self.status_path {
+            Some(path) => fs::read_to_string(path)
                 .ok()
-                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-                .unwrap_or_else(|| json!({}));
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok()),
+            None => Some(self.manifest.lock().unwrap()["current_status"].clone())
+                .filter(Value::is_object),
+        };
+        if self.status_path.is_some() || previous.is_some() {
+            let mut value = previous.unwrap_or_else(|| json!({}));
             if value["status"] == "running" || value["status"].is_null() {
                 value["status"] = json!(status);
             }

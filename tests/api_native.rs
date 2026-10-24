@@ -169,7 +169,18 @@ fn spec(f: &Fixture) -> ResolvedRequest {
         effort: None,
     }
 }
+/// In-process contexts write run manifests under the state dir; keep them out of the
+/// user's real `~/.local/state/multi-ai`, where they polluted stats and scorecards.
+fn isolate_state_dir() {
+    static STATE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    STATE.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MULTI_AI_STATE_DIR", dir.path()) };
+        dir
+    });
+}
 fn context(root: &tempfile::TempDir) -> OutputContext {
+    isolate_state_dir();
     let mut args = Args::default();
     args.set("out", root.path().join("out.md").display());
     args.set("progress-dir", root.path().join("progress").display());
@@ -1255,4 +1266,29 @@ async fn external_workspace_symlink_allows_fresh_call_but_requires_source_identi
     assert!(String::from_utf8_lossy(&refused.stderr).contains("source-id"));
     assert_eq!(f.requests.load(Ordering::SeqCst), 1);
     assert_eq!(std::fs::read_to_string(output).unwrap(), "answer");
+}
+
+#[test]
+fn finish_without_out_moves_manifest_current_status_off_running() {
+    isolate_state_dir();
+    let root = tempfile::tempdir().unwrap();
+    let mut args = Args::default();
+    args.set("progress-dir", root.path().join("progress").display());
+    let ctx = OutputContext::new(&args, "probe", false).unwrap();
+    ctx.save_status(json!({"status":"running","command":"probe"}))
+        .unwrap();
+    ctx.finish(0).unwrap();
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(ctx.dir.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["status"], "complete");
+    assert_eq!(manifest["current_status"]["status"], "complete");
+    assert_eq!(manifest["current_status"]["exitCode"], 0);
+    // The isolated state dir, not the user's, received the run.
+    assert!(
+        !ctx.dir
+            .starts_with(dirs_home().join(".local/state/multi-ai"))
+    );
+}
+fn dirs_home() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
 }

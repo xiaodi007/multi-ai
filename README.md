@@ -207,6 +207,7 @@ CLI 分类只使用诊断信道：Codex 的 stdout 只取 `error.message` 和 `t
 | `quota` | quota exhausted、usage limit | 额度池冷却，按原规则换备选；5 小时用量错误默认冷却 5 小时；余额不足、账户停用、请充值等欠费诊断记 `billing: true`，冷却 7 天直到充值后 `reset`，`status` 显示「欠费停用」 |
 | `rate_limit` | 429、1302、too many requests | 预算内指数退避重试，不写池冷却 |
 | `capacity` | at capacity、overloaded、server is busy、503、try a different model、temporarily unavailable | CLI 复用限流退避；run/batch 重试耗尽后可使用显式备选（含同池），不写池冷却 |
+| `model` | `unrecognized_model`、`model_not_found`、model … does not exist、模型不存在 | 通路配置的模型 id 被拒；不写池冷却，run/batch 直接换显式备选；改通路模型 id 或 `doctor --models` 核对后再用 |
 | `auth` | 独立的 401、403、Unauthorized、Forbidden、authentication | 首次冷却 10 分钟；同池连续第二次及以后冷却 240 分钟；实际非 auth 执行结果或手动 reset 清零连续次数 |
 | `transport` | connection reset、network、EOF | 默认冷却 5 分钟 |
 | `timeout` / `error` | 超时 / 其它失败（含输入过长） | 独立记录，不触发 auth 冷却 |
