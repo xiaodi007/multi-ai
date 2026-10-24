@@ -18,6 +18,13 @@ Implementation update on 2026-10-18 (offline, no new model measurements): native
 
 是否外包由宿主判断：`宿主核验成本＋漏报率×返工成本 < 宿主自己做的成本`。工具给外部秒数/采纳、宿主核验分钟/采纳和漏报率及有效样本数；返工成本、自己做的成本需要宿主估计，不自动宣称省token。
 
+## 2026-10-24 本机累计记录复盘（stats/scorecard，约 800 次运行，未新调用模型）
+
+- **agy-cli**：未标任务类型的 64 次里精度 0.174，宿主核对样本仍少（scorecard 仍判样本不足）。复核/找问题不当主力，只在别的通路不可用时用，并带金丝雀。
+- **kimi-k3-cli**：69 次调用里 quota 17 次、因冷却跳过 162 次。只放第二意见席位，最多 2 并发；批量派活加 `--preflight`。
+- **grok-cli**：triage 117 次失败率 0.026，仍是批量主力；复核 15 次精度 0.72、金丝雀 11/13。
+- **codex-cli**：实施 148 次（gpt-6.1-sol，含按会话日志回填的旧记录）全部合入，约一半需宿主返工；复核时专查撞号、判据写两份、排序无兜底。
+
 ## Which route for which job (historical observations)
 
 | Job | First choice | Second choice | Avoid |

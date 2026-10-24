@@ -23,7 +23,7 @@ cp -p "$binary" "$stage/$package_name/bin/multi-ai"
 cp -p "$script_dir/install.sh" "$script_dir/rollback.sh" "$script_dir/update-skills.sh" "$script_dir/rollback-skills.sh" \
   "$script_dir/install-skills.sh" "$script_dir/rollback-agent-skills.sh" "$stage/$package_name/"
 cp -Rp "$repo_dir/integration/skills/multi-ai" "$stage/$package_name/integration/skills/"
-cp -p "$script_dir/reclassify-implement.py" "$stage/$package_name/"
+cp -p "$script_dir/reclassify-implement.py" "$script_dir/backfill-codex-model.py" "$stage/$package_name/"
 cp -p "$repo_dir/README.md" "$stage/$package_name/"
 cp -p "$repo_dir/docs/COMPATIBILITY.md" "$stage/$package_name/docs/"
 cp -p "$repo_dir/docs/AGENT-INTEGRATION.md" "$stage/$package_name/docs/"
@@ -36,7 +36,7 @@ chmod 755 "$stage/$package_name/install-skills.sh" "$stage/$package_name/rollbac
 (
   cd "$stage/$package_name"
   shasum -a 256 bin/multi-ai install.sh rollback.sh update-skills.sh rollback-skills.sh install-skills.sh rollback-agent-skills.sh README.md docs/COMPATIBILITY.md docs/AGENT-INTEGRATION.md docs/DELEGATION.md docs/CLI-ISOLATION.md docs/VALIDATION-v0.2.md docs/TOKEN-BENCHMARK-v0.2.md \
-    reclassify-implement.py \
+    reclassify-implement.py backfill-codex-model.py \
     integration/skills/multi-ai/SKILL.md \
     integration/skills/multi-ai/scripts/run.sh integration/skills/multi-ai/agents/openai.yaml \
     integration/skills/multi-ai/references/delegation.md integration/skills/multi-ai/references/route-traits.md > SHA256SUMS

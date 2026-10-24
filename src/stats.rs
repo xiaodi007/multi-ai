@@ -262,10 +262,18 @@ pub(crate) fn records(state: &Path) -> Result<(Vec<RunRecords>, Value)> {
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        let Some(manifest) = read_json(&entry.path().join("manifest.json"), &mut invalid) else {
+        let Some(mut manifest) = read_json(&entry.path().join("manifest.json"), &mut invalid)
+        else {
             continue;
         };
         runs += 1;
+        // An unfinished run whose process is gone will never finish: report it as lost.
+        let lost = manifest["status"] == "running"
+            && manifest["finished_at"].is_null()
+            && !crate::runtime::run_alive(&entry.path(), &manifest);
+        if lost {
+            manifest["status"] = json!("lost");
+        }
         let command = manifest["command"].as_str().unwrap_or("");
         let mut records = BTreeMap::new();
         if let Some(reports) = manifest["reports"].as_array() {
@@ -314,6 +322,12 @@ pub(crate) fn records(state: &Path) -> Result<(Vec<RunRecords>, Value)> {
         attempts += records.len();
         let mut values: Vec<_> = records.into_values().collect();
         for value in &mut values {
+            if lost
+                && ["running", "pending", "queued"]
+                    .contains(&value["status"].as_str().unwrap_or(""))
+            {
+                value["status"] = json!("lost");
+            }
             if value["task_type"].is_null() {
                 value["task_type"] = manifest["task_type"].clone();
             }

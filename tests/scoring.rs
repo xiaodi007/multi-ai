@@ -804,3 +804,16 @@ fn recommend_exposes_capacity_failure_rate_for_current_identity() {
     ));
     assert_eq!(report["routes"][0]["failure_rates"]["capacity"], 1.0);
 }
+
+#[test]
+fn defect_tag_synonyms_merge_and_none_is_not_a_defect() {
+    use multi_ai::scorecard::canonical_defect_tag as tag;
+    assert_eq!(tag("criterion-duplicated").as_deref(), Some("判据写两份"));
+    assert_eq!(tag(" Sort-Tiebreak ").as_deref(), Some("排序无兜底"));
+    assert_eq!(tag("id-collision").as_deref(), Some("撞号"));
+    assert_eq!(tag("撞号").as_deref(), Some("撞号"));
+    assert_eq!(tag("N+1性能").as_deref(), Some("N+1性能"));
+    assert_eq!(tag("无"), None);
+    assert_eq!(tag("none"), None);
+    assert_eq!(tag(""), None);
+}

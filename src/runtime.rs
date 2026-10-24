@@ -169,9 +169,27 @@ pub struct OutputContext {
     pub excludes: Vec<PathBuf>,
     status_path: Option<PathBuf>,
     _lock: Arc<OutputLock>,
+    /// Held exclusively while the run's process lives; the kernel drops it on any exit.
+    _alive: Arc<File>,
     manifest: Arc<Mutex<Value>>,
     published: Arc<Mutex<Vec<PathBuf>>>,
     attempts: Arc<Mutex<Vec<Attempt>>>,
+}
+/// Runs without a liveness lock (older engines) count as lost after this long.
+const LEGACY_LOST_AFTER_HOURS: i64 = 24;
+/// Whether an unfinished run's process still exists. A run killed, crashed or closed with
+/// its session never writes finished_at; its liveness lock is then free.
+pub fn run_alive(dir: &Path, manifest: &Value) -> bool {
+    match File::open(dir.join("alive.lock")) {
+        Ok(file) => unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) != 0 },
+        Err(_) => manifest["started_at"]
+            .as_str()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .is_none_or(|started| {
+                Utc::now().signed_duration_since(started)
+                    < chrono::Duration::hours(LEGACY_LOST_AFTER_HOURS)
+            }),
+    }
 }
 impl OutputContext {
     pub fn new(args: &Args, command: &str, dispatch: bool) -> Result<Self> {
@@ -265,6 +283,17 @@ impl OutputContext {
         let dir = state_dir().join("runs").join(&run_id);
         private_dir(&dir)?;
         private_dir(&progress_dir)?;
+        let alive = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(dir.join("alive.lock"))?;
+        if unsafe { libc::flock(alive.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            bail!("run liveness lock is already held: {}", dir.display());
+        }
         let mut excludes = vec![dir.clone(), state_dir(), progress_base.clone()];
         if let Some(p) = &outdir {
             excludes.push(p.clone());
@@ -278,7 +307,7 @@ impl OutputContext {
             excludes.push(p.clone());
         }
         let manifest = json!({"schemaVersion":1,"engine":"multi-ai-rust","engineVersion":env!("CARGO_PKG_VERSION"),
-            "run_id":run_id,"command":command,"task_type":args.get("task-type"),"status":"running","started_at":Utc::now().to_rfc3339(),
+            "run_id":run_id,"command":command,"task_type":args.get("task-type"),"status":"running","started_at":Utc::now().to_rfc3339(),"pid":std::process::id(),
             "reports":[],"outputs":{"out":output,"outdir":outdir,"progress":progress_dir},"excludes":excludes});
         let ctx = Self {
             task_type: args.get("task-type").map(str::to_owned),
@@ -291,6 +320,7 @@ impl OutputContext {
             excludes,
             status_path,
             _lock: lock,
+            _alive: Arc::new(alive),
             manifest: Arc::new(Mutex::new(manifest)),
             published: Arc::new(Mutex::new(Vec::new())),
             attempts: Arc::new(Mutex::new(Vec::new())),
@@ -851,8 +881,7 @@ fn prepare_feedback(args: &Args) -> Result<(PathBuf, Value)> {
     if let Some(tags) = args.get("defect-tags") {
         implementation["defect-tags"] = json!(
             tags.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
+                .filter_map(crate::scorecard::canonical_defect_tag)
                 .collect::<std::collections::BTreeSet<_>>()
         );
         has_count = true;

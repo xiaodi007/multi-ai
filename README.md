@@ -296,6 +296,9 @@ TSV 首行为 `id<Tab>accepted<Tab>false_positive<Tab>uncertain<Tab>evidence`，
 | 指标 | 口径 |
 |---|---|
 | 样本数、失败率 | 真实适配调用；缓存、冷却跳过、未启动和进行中不计。失败细分 quota、rate_limit、capacity、timeout；失败也计耗时。 |
+| 未结束的运行 | 每次运行持有 `runs/<id>/alive.lock` 并记 `pid`；没有 `finished_at` 而锁已释放（进程被杀、会话关闭）记 `lost` 计入失败。旧引擎没有锁的记录超过 24 小时未结束才记 `lost`。 |
+| 样本不足原因 | scorecard 的 `assessment_missing` 与表格最后一列写明缺哪项（调用、人工核对、金丝雀、合入结果、返工条数，各需 5）。 |
+| 缺陷标签 | `--defect-tags` 写入与 scorecard 读取共用同义表（如 criterion-duplicated→判据写两份、id-collision→撞号），「无」不计；历史反馈不改写，读取时归并。 |
 | 精度 | accepted / (accepted + false_positive)；只用两个字段均已知的报告；重复和待定不进分母。 |
 | 金丝雀召回、漏报率 | 命中 / 已知答案总数；漏报率 = 1 − 召回。缓存不重复累计。 |
 | 中位数、P90 | 单位秒；偶数中位取平均，P90 用 nearest rank。JSON 比率为 0～1。 |
@@ -340,6 +343,8 @@ multi-ai feedback --run RUN --report ATTEMPT --outcome merged \
   --rework-items 0 --evidence '宿主复核证据'
 multi-ai scorecard --task-type implement --json
 ```
+
+早期 codex-cli 实施没用 JSON 事件流，记录里没有模型。`scripts/backfill-codex-model.py` 按 Codex 会话日志（`~/.codex/sessions`）离线回填：同一 cwd、尝试开始后 120 秒内恰好一个 `codex_exec` 会话且只用一个模型时才写 `model`、`model_source=codex-session-log`，原文件留作 `metadata.before-model-backfill.json`；多个会话或匹配不到的保持未知。默认预演，`--apply` 才写入。
 
 判据：只处理没有 attribution 的旧 boundary_violation；response.status=ok、response.complete=true、response.exitCode=0、summary_published=true、Git 检查正常，且当前发布摘要以完整非空 last-message 正文结尾。校验 run/attempt、manifest、status 和 artifacts 路径身份。宿主显式应用才将旧未归因变化重判为警告、缺失类型补 implement，并登记绑定 SHA-256 的摘要；不推断采纳、返工或历史模型。保留原诊断正文与 `summary_kind=diagnostic`，原始元数据备份到 artifacts/legacy-before-reclassification.json，完整旧越界路径也在该备份。所有记录先预检，文件逐个原子替换，manifest 最后发布；进程中断需从备份人工恢复后重试，不在有并发写入时执行。同一 run 一次仅修一个 attempt。无法满足完整性判据的记录拒绝重判。
 

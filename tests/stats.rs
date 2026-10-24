@@ -310,3 +310,40 @@ fn attempt_ids_are_only_deduplicated_within_their_run() {
     assert_eq!(row(&report, "fake")["output_bytes"], 0);
     assert_eq!(row(&report, "fake")["output_bytes_samples"], 2);
 }
+
+#[test]
+fn unfinished_runs_whose_process_is_gone_count_as_lost() {
+    use std::os::fd::AsRawFd;
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path();
+    let attempt =
+        |id: &str| json!({"attempt_id":id,"route":"fake","status":"running","model_calls":1});
+    let unfinished = |id: &str, started: &str| {
+        let mut manifest = run_record(state, id, "run", &[attempt(id)]);
+        manifest["status"] = json!("running");
+        manifest["started_at"] = json!(started);
+        write_json(
+            &state.join("runs").join(id).join("manifest.json"),
+            &manifest,
+        );
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    // Lock held: the process is alive.
+    unfinished("held", &now);
+    let held = fs::File::create(state.join("runs/held/alive.lock")).unwrap();
+    assert_eq!(
+        unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    // Lock file left behind but free: the process died without finishing.
+    unfinished("released", &now);
+    fs::File::create(state.join("runs/released/alive.lock")).unwrap();
+    // Older engines wrote no lock: lost only after a day.
+    unfinished("legacy-recent", &now);
+    unfinished("legacy-old", "2026-01-01T00:00:00+00:00");
+    let report = stats(state);
+    let fake = row(&report, "fake");
+    assert_eq!(fake["in_progress"], 2, "{fake}");
+    assert_eq!(fake["failures"]["lost"], 2, "{fake}");
+    drop(held);
+}

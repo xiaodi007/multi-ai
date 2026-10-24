@@ -335,12 +335,14 @@ pub fn collect(state: &Path, args: &Args) -> Result<Value> {
                     cell.rework_round_samples += 1;
                 }
                 if let Some(tags) = feedback["implementation"]["defect-tags"].as_array() {
+                    // Feedback is append-only; older synonyms are merged when read.
                     for tag in tags
                         .iter()
                         .filter_map(Value::as_str)
+                        .filter_map(canonical_defect_tag)
                         .collect::<HashSet<_>>()
                     {
-                        *cell.defect_tags.entry(tag.into()).or_default() += 1;
+                        *cell.defect_tags.entry(tag).or_default() += 1;
                     }
                 }
                 continue;
@@ -388,11 +390,22 @@ pub fn collect(state: &Path, args: &Args) -> Result<Value> {
         let recall = ratio(c.canary_hits as f64,c.canary_total);
         let implementation = task_type.as_deref() == Some("implement");
         let sufficient = c.calls >= 5 && if implementation {c.outcome_samples >= 5 && c.rework_item_samples >= 5} else {c.verified >= 5 && c.canary_samples >= 5};
+        // Name what blocks a comparison: usually missing human feedback, not too few calls.
+        let need = |label: &str, have: u64, missing: &mut Vec<String>| if have < 5 { missing.push(format!("{label}{have}/5")) };
+        let mut missing = Vec::new();
+        need("调用", c.calls, &mut missing);
+        if implementation {
+            need("合入结果", c.outcome_samples, &mut missing);
+            need("返工条数", c.rework_item_samples, &mut missing);
+        } else {
+            need("人工核对", c.verified, &mut missing);
+            need("金丝雀", c.canary_samples, &mut missing);
+        }
         let failed: u64 = c.failures.values().sum();
         let rates: BTreeMap<_,_> = ["quota","rate_limit","capacity","timeout"].into_iter().map(|s|(s,ratio(*c.failures.get(s).unwrap_or(&0) as f64,c.calls))).collect();
         let mut revisions: Vec<_> = c.revisions.into_iter().collect(); revisions.sort();
         let mut row = json!({"route":route,"task_type":task_type,"model":model,"sample_count":c.calls,"verified_samples":c.verified,
-            "assessment":if sufficient && (implementation || (precision.is_some() && recall.is_some())){"可比较"}else{"样本不足"},
+            "assessment":if sufficient && (implementation || (precision.is_some() && recall.is_some())){"可比较"}else{"样本不足"},"assessment_missing":missing,
             "accepted":(c.accepted_samples>0).then_some(c.accepted),"accepted_samples":c.accepted_samples,"false_positive":(c.false_positive_samples>0).then_some(c.false_positive),"false_positive_samples":c.false_positive_samples,"precision":precision,
             "precision_accepted":c.precision_accepted,"precision_false_positive":c.precision_false,
             "canary_hits":c.canary_hits,"canary_total":c.canary_total,"canary_samples":c.canary_samples,"canary_recall":recall,
@@ -445,6 +458,19 @@ pub fn command(args: &Args) -> Result<i32> {
             ))?;
         }
         let metric = |v: &Value| v.as_f64().map_or_else(|| "-".into(), |n| format!("{n:.3}"));
+        let assessment = |row: &Value| {
+            let label = row["assessment"].as_str().unwrap_or("-");
+            let missing = row["assessment_missing"].as_array().map(|m| {
+                m.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("、")
+            });
+            match missing {
+                Some(m) if label == "样本不足" && !m.is_empty() => format!("{label}（缺 {m}）"),
+                _ => label.to_owned(),
+            }
+        };
         for row in report["cells"].as_array().unwrap() {
             if row["task_type"] == "implement" {
                 runtime::stdout_line(format_args!(
@@ -463,7 +489,7 @@ pub fn command(args: &Args) -> Result<i32> {
                     row["boundary_warning_count"],
                     row["attributed_boundary_count"],
                     row["defect_tags"],
-                    row["assessment"]
+                    assessment(row)
                 ))?;
                 continue;
             }
@@ -486,7 +512,7 @@ pub fn command(args: &Args) -> Result<i32> {
                 metric(&row["failure_rates"]["timeout"]),
                 metric(&row["external_seconds_per_accepted"]),
                 metric(&row["host_screen_minutes_per_accepted"]),
-                row["assessment"].as_str().unwrap()
+                assessment(row)
             ))?;
         }
         runtime::stdout_line(format_args!(
@@ -738,4 +764,33 @@ pub fn recommend_command(config: &Config, args: &Args) -> Result<i32> {
         runtime::stdout_line(format_args!("{}", report["note"].as_str().unwrap()))?;
     }
     Ok(0)
+}
+
+/// Same defect, different wording or language, observed across real feedback rounds.
+/// Only clear synonyms are merged; distinct defects stay distinct. "无" means no defect.
+const DEFECT_TAG_ALIASES: &[(&str, &str)] = &[
+    ("criterion-duplicated", "判据写两份"),
+    ("sort-tiebreak", "排序无兜底"),
+    ("browser-only", "单测过浏览器才抓到"),
+    ("id-collision", "撞号"),
+    ("performance", "性能未达标"),
+    ("comment-claims-wrong", "注释与代码不符"),
+    ("over-truncation", "截断过度"),
+    ("premature-discard", "过早丢弃"),
+    ("registry-docs", "登记表未同步"),
+    ("scope-creep-card-edit", "越界改任务卡"),
+];
+pub fn canonical_defect_tag(tag: &str) -> Option<String> {
+    let tag = tag.trim();
+    if tag.is_empty() || ["无", "none", "-"].contains(&tag.to_lowercase().as_str()) {
+        return None;
+    }
+    let lower = tag.to_lowercase();
+    Some(
+        DEFECT_TAG_ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == lower)
+            .map_or(tag, |(_, canonical)| canonical)
+            .to_owned(),
+    )
 }

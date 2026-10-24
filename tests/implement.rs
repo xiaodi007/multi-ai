@@ -712,7 +712,10 @@ printf 'implementation finished' > "$out"
     assert_eq!(second["cells"][0]["sample_count"], 1);
     assert_eq!(second["cells"][0]["mean_rework_items"], 3.0);
     assert_eq!(second["cells"][0]["merge_rate"], 1.0);
-    assert_eq!(second["cells"][0]["defect_tags"], json!({"browser-only":1}));
+    assert_eq!(
+        second["cells"][0]["defect_tags"],
+        json!({"单测过浏览器才抓到":1})
+    );
     fs::write(
         Path::new(status["artifacts"].as_str().unwrap()).join("report.md"),
         "corrupt",
@@ -843,7 +846,7 @@ fn explicit_watch_is_warning_without_events_and_batch_implementation_feedback_wo
     );
     assert_eq!(
         score(&f)["cells"][0]["defect_tags"],
-        json!({"sort-tiebreak":1})
+        json!({"排序无兜底":1})
     );
 }
 
