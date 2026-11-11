@@ -22,8 +22,8 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, process::Command, sync::mpsc};
 
-pub(crate) const KIMI_VERSION: &str = "2.3.1";
-pub(crate) const GROK_VERSION: &str = "grok 1.0.67 (2fe064390d07)";
+pub(crate) const KIMI_VERSION: &str = "2.5.3";
+pub(crate) const GROK_VERSION: &str = "grok 1.0.77 (50ca579fa996)";
 const MAX_LOG_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -350,6 +350,8 @@ fn model_for_kimi(config: &Config, route: &Route) -> Result<String> {
         "kimi-code/kimi-for-coding-highspeed",
         "kimi-code/k3",
         "kimi-code/k3-256k",
+        "kimi-code/k3.1-pro",
+        "kimi-code/k3.1-pro-highspeed",
     ]
     .contains(&alias.as_str())
     {
@@ -505,7 +507,10 @@ fn prepare(
     if vendor == Vendor::Kimi {
         let alias = model_for_kimi(config, route)?;
         let wire_model = alias.strip_prefix("kimi-code/").context("managed alias")?;
-        let max_context = if wire_model == "k3" { 1048576 } else { 262144 };
+        let max_context = match wire_model {
+            "k3" | "k3.1-pro" | "k3.1-pro-highspeed" => 1048576,
+            _ => 262144,
+        };
         // Only the K3 family supports selectable effort. Coding models have a
         // 256K window and must not inherit K3's 1M/effort metadata.
         let (model_effort, thinking_effort) = if wire_model.starts_with("k3") {

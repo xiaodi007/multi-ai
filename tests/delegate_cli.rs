@@ -135,7 +135,7 @@ fn installed_grok_rejects_native_tools_and_file_backed_mcp_arguments() {
     assert!(
         String::from_utf8_lossy(&version.stdout)
             .trim()
-            .starts_with("grok 1.0.67 (2fe064390d07)")
+            .starts_with("grok 1.0.77 (50ca579fa996)")
     );
     let exe = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|p| p.join("grok"))
@@ -243,7 +243,7 @@ fn installed_grok_rejects_native_tools_and_file_backed_mcp_arguments() {
 #[ignore = "optional installed Kimi/Grok positive broker check; dummy loopback inference only"]
 fn installed_vendors_read_only_packet_material_and_finish() {
     for (vendor_name, expected_version) in
-        [("kimi", "2.3.1"), ("grok", "grok 1.0.67 (2fe064390d07)")]
+        [("kimi", "2.5.3"), ("grok", "grok 1.0.77 (50ca579fa996)")]
     {
         let exe = std::env::split_paths(&std::env::var_os("PATH").unwrap())
             .map(|p| p.join(vendor_name))
@@ -498,7 +498,7 @@ fn command(temp: &TempDir, home: &Path) -> Command {
 }
 
 fn setup_kimi(body: &str) -> (TempDir, PathBuf) {
-    let (temp, home) = setup("grok 1.0.67 (2fe064390d07) [stable]", "exit 77");
+    let (temp, home) = setup("grok 1.0.77 (50ca579fa996) [stable]", "exit 77");
     let credentials = home.join(".kimi-code/credentials");
     fs::create_dir_all(&credentials).unwrap();
     fs::write(
@@ -510,7 +510,7 @@ fn setup_kimi(body: &str) -> (TempDir, PathBuf) {
     fs::write(
         &exe,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.3.1\\n'; exit 0; fi\n{body}\n"
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.5.3\\n'; exit 0; fi\n{body}\n"
         ),
     )
     .unwrap();
@@ -533,6 +533,8 @@ fn kimi_generated_model_metadata_matches_coding_and_k3_contracts() {
         ("kimi-code/kimi-for-coding-highspeed", 262144, false),
         ("kimi-code/k3", 1048576, true),
         ("kimi-code/k3-256k", 262144, true),
+        ("kimi-code/k3.1-pro", 1048576, true),
+        ("kimi-code/k3.1-pro-highspeed", 1048576, true),
     ] {
         let body = r#"
 cat "$KIMI_CODE_HOME/config.toml" >&2
@@ -802,10 +804,10 @@ fn unknown_vendor_version_fails_closed_and_does_not_read_auth_contents() {
 
 #[test]
 fn offline_version_probe_does_not_wait_for_orphaned_stdout() {
-    let (temp, home) = setup("grok 1.0.67 (2fe064390d07) [stable]", "exit 1");
+    let (temp, home) = setup("grok 1.0.77 (50ca579fa996) [stable]", "exit 1");
     fs::write(
         temp.path().join("fake-grok"),
-        "#!/bin/sh\n(sleep 20) &\nprintf '%s\\n' 'grok 1.0.67 (2fe064390d07) [stable]'\nexit 0\n",
+        "#!/bin/sh\n(sleep 20) &\nprintf '%s\\n' 'grok 1.0.77 (50ca579fa996) [stable]'\nexit 0\n",
     )
     .unwrap();
     let started = Instant::now();
@@ -848,7 +850,7 @@ test ! -e "$PWD/.grok/config.toml" || exit 48
 printf '%s\n' '{"type":"system","subtype":"init","model":"mock","tools":["search_tool","use_tool"],"mcp_servers":[{"name":"multi_ai"}]}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"schema_version\":1,\"findings\":[],\"checked_scope\":[\"source.txt\"],\"uncovered_scope\":[],\"uncertainties\":[]}"}'
 "#;
-    let (temp, home) = setup("grok 1.0.67 (2fe064390d07) [stable]", body);
+    let (temp, home) = setup("grok 1.0.77 (50ca579fa996) [stable]", body);
     let repo = temp.path().join("repo");
     fs::create_dir(&repo).unwrap();
     fs::write(repo.join("source.txt"), "fixture\n").unwrap();
@@ -912,10 +914,10 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{
 
 #[test]
 fn timeout_kills_cli_descendants_and_stops_fallback_after_body() {
-    let (temp, home) = setup("grok 1.0.67 (2fe064390d07) [stable]", "exit 1");
+    let (temp, home) = setup("grok 1.0.77 (50ca579fa996) [stable]", "exit 1");
     let marker = temp.path().join("descendant-survived");
     let body = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' 'grok 1.0.67 (2fe064390d07) [stable]'; exit 0; fi\nprintf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"tools\":[\"search_tool\",\"use_tool\"]}}'\nprintf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"received partial body\"}}]}}}}'\n(sleep 5; touch '{}') &\nsleep 20\n",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' 'grok 1.0.77 (50ca579fa996) [stable]'; exit 0; fi\nprintf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"tools\":[\"search_tool\",\"use_tool\"]}}'\nprintf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"received partial body\"}}]}}}}'\n(sleep 5; touch '{}') &\nsleep 20\n",
         marker.display()
     );
     fs::write(temp.path().join("fake-grok"), body).unwrap();
@@ -968,8 +970,8 @@ fn installed_kimi_rejects_injected_native_tool_and_exposes_only_broker() {
     let version = Command::new("kimi")
         .arg("--version")
         .output()
-        .expect("install Kimi 2.3.1 for this optional check");
-    assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), "2.3.1");
+        .expect("install Kimi 2.5.3 for this optional check");
+    assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), "2.5.3");
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("home");
     let vendor = home.join(".kimi-code");
@@ -1152,15 +1154,43 @@ fn installed_kimi_rejects_injected_native_tool_and_exposes_only_broker() {
                     || s.contains("not allowed")))
     );
     assert!(
-        data[2]["messages"].as_array().unwrap().iter().any(|m| {
-            m["role"] == "tool"
-                && m["content"].as_str().is_some_and(|s| {
-                    s.contains("select_tools")
-                        && (s.contains("not active")
-                            || s.contains("not allowed")
-                            || s.contains("not found"))
+        data.iter().all(|req| {
+            let names: Vec<_> = req["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t["function"]["name"].as_str())
+                .collect();
+            names.len() == 3
+                && names.iter().all(|n| {
+                    [
+                        "mcp__multi_ai__list",
+                        "mcp__multi_ai__search",
+                        "mcp__multi_ai__read",
+                    ]
+                    .contains(n)
                 })
         }),
+        "tool list changed after a rejected call"
+    );
+    // 2.5.3 records the rejection on the session stream and may omit that
+    // failed call from the next inference request. Either place is a refusal.
+    let session = String::from_utf8_lossy(&output.stdout);
+    let refused = |text: &str| {
+        text.contains("select_tools")
+            && (text.contains("not active")
+                || text.contains("not allowed")
+                || text.contains("not found"))
+    };
+    let in_request = data.iter().any(|req| {
+        req["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|m| m["role"] == "tool" && m["content"].as_str().is_some_and(refused))
+    });
+    assert!(
+        in_request || refused(&session),
         "select_tools did not receive a policy rejection"
     );
 }
@@ -1168,7 +1198,7 @@ fn installed_kimi_rejects_injected_native_tool_and_exposes_only_broker() {
 #[test]
 fn restricted_grok_preserves_capacity_diagnostic_through_delegate() {
     let (temp, home) = setup(
-        "grok 1.0.67 (2fe064390d07) [stable]",
+        "grok 1.0.77 (50ca579fa996) [stable]",
         r#"
 printf '%s\n' '{"type":"system","subtype":"init","tools":["search_tool","use_tool"],"mcp_servers":[{"name":"multi_ai"}]}'
 printf '%s\n' '{"role":"tool","content":"401 Unauthorized"}'
@@ -1211,7 +1241,7 @@ exit 1
 #[test]
 fn restricted_grok_success_breaks_auth_streak_before_result_validation() {
     let (temp, home) = setup(
-        "grok 1.0.67 (2fe064390d07) [stable]",
+        "grok 1.0.77 (50ca579fa996) [stable]",
         r#"
 printf '%s\n' '{"type":"system","subtype":"init","tools":["search_tool","use_tool"]}'
 printf '%s\n' '{"type":"result","is_error":false,"subtype":"success","result":"not a valid investigation report"}'
@@ -1257,8 +1287,8 @@ printf '%s\n' '{"type":"result","is_error":false,"subtype":"success","result":"n
 #[test]
 fn grok_release_channel_suffix_does_not_change_the_validated_build() {
     for printed in [
-        "grok 1.0.67 (2fe064390d07)",
-        "grok 1.0.67 (2fe064390d07) [stable]",
+        "grok 1.0.77 (50ca579fa996)",
+        "grok 1.0.77 (50ca579fa996) [stable]",
     ] {
         let (temp, home) = setup(printed, "exit 77");
         let out = command(&temp, &home)

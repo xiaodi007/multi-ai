@@ -14,7 +14,7 @@ use std::{
 };
 use tempfile::TempDir;
 
-const GROK_VERSION: &str = "grok 1.0.67 (2fe064390d07) [stable]";
+const GROK_VERSION: &str = "grok 1.0.77 (50ca579fa996) [stable]";
 const USER_CONFIG: &[u8] = b"[models]\ndefault = \"user-config-must-stay\"\n";
 
 fn auth_value(sequence: u64) -> Value {

@@ -1,6 +1,6 @@
 # 委派 CLI 的读取边界
 
-`delegate` 使用独立适配器，旧 `run/review` 的厂商参数保持原义。当前验收 Kimi `2.3.1` 与 Grok `1.0.67 (2fe064390d07)`；其他版本停止受限委派，旧入口仍可使用，`doctor` 在 stderr 和 `warnings` 中逐版本提示。`doctor` 的 `delegation.available` 表示可尝试，不代表登录成功或账户还有额度。2026-10-04 的旧版本实测保留为历史证据。
+`delegate` 使用独立适配器，旧 `run/review` 的厂商参数保持原义。当前验收 Kimi `2.5.3` 与 Grok `1.0.77 (50ca579fa996)`；其他版本停止受限委派，旧入口仍可使用，`doctor` 在 stderr 和 `warnings` 中逐版本提示。`doctor` 的 `delegation.available` 表示可尝试，不代表登录成功或账户还有额度。2026-10-04 的旧版本实测保留为历史证据。
 
 ## 如何限制材料
 
@@ -37,7 +37,7 @@ GROK_HOME="$HOME/.local/state/multi-ai/delegate-cli/login/grok" grok login
 
 独立登录目录位于运行状态区，不是仓库或发布资产。Kimi 默认模型只接受当前验收的 managed Kimi Code 别名；任意自定义 provider 配置不会自动移入新适配器。`kimi-k3-cli` 保持明确 K3 模型，Grok 记录会话初始化和真实 usage 返回的模型身份；未知身份不能用于恢复缓存。
 
-Kimi 普通 `kimi-for-coding` 与 `highspeed` 的隔离配置为 262144 上下文，K3 为 1048576，`k3-256k` 为 262144。仅 K3 家族声明 `support_efforts=["low","high","max"]`，并将调查 effort 设为 low；普通 coding 模型不伪装支持 K3 effort。Kimi 2.1.1 失败时也会 flush assistant 正文，只有最终无工具调用正文、随后有效的 `session.resume_hint` 和进程 exit 0 同时成立才算完成；Grok 仍必须有 success result 与完整正文。
+Kimi 普通 `kimi-for-coding` 与 `highspeed` 的隔离配置为 262144 上下文，`k3`、`k3.1-pro` 与 `k3.1-pro-highspeed` 为 1048576，`k3-256k` 为 262144。仅 K3 家族声明 `support_efforts=["low","high","max"]`，并将调查 effort 设为 low；普通 coding 模型不伪装支持 K3 effort。Kimi 2.1.1 失败时也会 flush assistant 正文，只有最终无工具调用正文、随后有效的 `session.resume_hint` 和进程 exit 0 同时成立才算完成；Grok 仍必须有 success result 与完整正文。
 
 ## 验收证据
 
@@ -61,6 +61,8 @@ Kimi 检查真实 API 请求仅携带三个材料工具，并强制返回未经�
 2026-10-11 在 macOS arm64 上使用上述精确新版实际完成三项厂商 loopback 检查；共享认证和配置生成回归也已执行。Kimi 源码依据固定在 2.1.1 commit `f67e6398fb3210ad8ace970e2dfd5bcc984ed61f`，其 native 协议将 effort 编码为 `thinking.effort`。Grok 1.0.50 的公开源码未能按其 build SHA 获取，配置主分支只作为线索，实际二进制的正反向测试才是本轮版本门禁的验收依据。本轮没有发送真实外部模型请求，不宣称登录、额度或推理服务健康已验证。
 
 2026-10-24 本机 Kimi 升到 2.3.1、Grok 升到 1.0.67 后（升级前已是 2.2.0／1.0.62，委派此前已静默停用），用安装的二进制重跑上述三项 `installed_*` loopback 检查与 `grok_refresh` 回归，全部通过后改写版本门禁。Grok 的 `--version` 能读到自身配置时带 ` [stable]` 渠道后缀、读不到时没有，门禁去掉末尾渠道名后比对构建号。本轮同样只用 dummy key 与本机 mock 推理，没有为验收源码另行固定 Kimi 2.3.1 commit。
+
+2026-11-11 本机 Kimi 升到 2.5.3、Grok 升到 1.0.77 `(50ca579fa996)` 后重跑上述三项 `installed_*`。Grok 拒绝原生 bash 与文件型 `use_tool` 参数，正向 list/search/read 完成。Kimi 正向检查完成，请求里的模型仍是 `k3` 且 `thinking.effort=low`。Kimi 对注入的 `Bash` 仍在下一轮请求里返回 `Tool "Bash" not found`，工具目录保持三个材料工具，标记文件没有被创建。`select_tools` 的拒绝写在会话流（`Tool "select_tools" not found`），2.5.3 不再把这次失败调用放进下一轮推理请求；工具目录没有因此增加 `Bash`。`grok_refresh` 用假 CLI 回归。没有发送真实外部模型请求，也没有另行固定 Kimi 2.5.3 的源码 commit。允许的 managed 别名增加 `k3.1-pro` 与 `k3.1-pro-highspeed`，上下文与 effort 与 `k3` 相同。
 
 2026-10-04 在 macOS arm64 上完成以上检查，并分别使用真实 Kimi/Grok 调查虚构两行源码：任务提示不包含答案，模型通过材料服务找到端口 `7319`，输出的文件哈希与行号通过主程序校验。Kimi 用 2 次材料调用，Grok用 4 次。真实 CLI 用量缺失时保留 null；没有把一次委派当成一次厂商模型请求，也没有据此宣称主模型节省率。
 
