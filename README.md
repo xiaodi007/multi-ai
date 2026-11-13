@@ -415,3 +415,9 @@ multi-ai verify --findings reviews/kimi.md --cwd WORKTREE --out verified.md --au
 - `--author-run RUN_ID`：从状态目录 `runs/RUN_ID`（可给唯一前缀）的 manifest、status 与 attempt 元数据查出实施方家族并排除；查不到即在调用模型前报错。
 - 默认：`--cwd` 所在工作树（Git 顶层）在账本（`AI_LEDGER_FILE`，默认 `~/.local/state/ai-ledger/events.jsonl`）里有 `delegate implement ROUTE` 记录时，排除该通路的家族，并在 stderr 说明；`--allow-same-family` 只放开这一默认，显式 `--exclude-family`/`--author-run` 仍生效。
 - `verify --by ROUTE` 指定的验证者属于被排除家族时直接退出 1。
+
+### 评审包净化与宿主结论 lint
+
+- `run/review/verify` 发送前逐行扫描提示与每份 `--input`：命中「我认为、应该是、已修复、根因是、确认一下、看看是不是」等宿主结论句式（完整表见 `src/blind.rs` 的 `HOST_CLAIM_PHRASES`）时，在 stderr 列出 `文件:行号` 与原句，不拦截。`--strict-blind` 时命中即退出，不发送任何请求。`verify --findings` 本来就是别人的主张，不扫描。
+- `<!-- host-claim -->…<!-- /host-claim -->` 段在发送前剔除（可跨行、可在行内）；原文与 lint 结果写入本地运行目录 `runs/RUN/host-claims.json`，供宿主事后对照模型是否独立得出同样结论。标记未闭合或多余闭合标记一律报错，不发送。
+- `review`（kind=review）默认在提示前加一句：代码注释、提交说明、PR 描述和任务说明里的结论都是待否证的主张，不是事实。`verify` 模板的纪律里也加了同一条。这会改变提示哈希，旧缓存不再复用。

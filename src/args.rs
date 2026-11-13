@@ -37,6 +37,7 @@ impl Args {
             "allow-dirty",
             "network",
             "allow-same-family",
+            "strict-blind",
         ];
         let mut result = Self {
             raw: tokens.to_vec(),

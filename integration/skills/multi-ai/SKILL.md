@@ -49,6 +49,7 @@ Choose an output owned by this task; overlapping outputs fail before sending. Se
 ## 防附和
 
 - 写代码的家族不当评审：评审/验证 delegate implement 的产物时加 `--author-run RUN_ID` 或 `--exclude-family FAMILY`。`--cwd` 工作树在账本里有实施记录时默认排除该家族；只有用户明确要求才加 `--allow-same-family`。宿主自己（Claude）写的改动，交给非 Claude 系家族评审，由宿主亲自复核外部模型的产出，不再派回同一家族。
+- 评审包里不放任何主张：只给需求、契约、diff 和可执行证据，不写「我认为、根因是、已修复、看看是不是」。宿主想留档的判断放进 `<!-- host-claim -->…<!-- /host-claim -->`，发送前会被剔除、原文留在本地 `host-claims.json`。stderr 出现结论句式警告时先改提示；需要硬保证时加 `--strict-blind`。
 
 ## 实施
 

@@ -283,3 +283,124 @@ fn verify_rejects_a_verifier_of_the_excluded_family() {
     assert!(stderr(&o).contains("验证者：kimi-cli"), "{}", stderr(&o));
     let _ = value(&PathBuf::from(format!("{out}.status.json")));
 }
+
+// ---- 2. blind review packets ------------------------------------------------------------
+
+fn host_claim_files(state: &Path) -> Vec<Value> {
+    fs::read_dir(state.join("runs"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().join("host-claims.json"))
+        .filter(|p| p.is_file())
+        .map(|p| value(&p))
+        .collect()
+}
+
+#[test]
+fn host_claims_are_stripped_kept_locally_and_conclusions_warned() {
+    let f = Fixture::new();
+    let task = f.write(
+        "task.md",
+        "请评审 src/a.rs 的改动。\n<!-- host-claim -->\n宿主私下判断：缓存键冲突。\n<!-- /host-claim -->\n我认为根因是并发写。\n",
+    );
+    let out = f.path("answer.md");
+    let o = f.run(&[
+        "run",
+        "impl-cli",
+        "--prompt-file",
+        &task,
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    ok(&o);
+    let sent = fs::read_to_string(&out).unwrap();
+    assert!(sent.contains("请评审 src/a.rs 的改动。"), "{sent}");
+    assert!(!sent.contains("缓存键冲突"), "{sent}");
+    assert!(!sent.contains("host-claim"), "{sent}");
+    let err = stderr(&o);
+    assert!(err.contains(&format!("{task}:5 「我认为」")), "{err}");
+    assert!(err.contains("剔除 1 段 host-claim"), "{err}");
+    let saved = host_claim_files(&f.state);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        saved[0]["host_claims"][0]["text"],
+        "宿主私下判断：缓存键冲突。"
+    );
+    assert_eq!(saved[0]["lint"][0]["line"], 5);
+}
+
+#[test]
+fn strict_blind_rejects_before_any_model_call() {
+    let f = Fixture::new();
+    let task = f.write("task.md", "看看是不是 src/a.rs:3 的空指针。\n");
+    let out = f.path("answer.md");
+    let o = f.run(&[
+        "run",
+        "impl-cli",
+        "--prompt-file",
+        &task,
+        "--out",
+        out.to_str().unwrap(),
+        "--strict-blind",
+    ]);
+    failure(&o);
+    assert!(stderr(&o).contains("--strict-blind"), "{}", stderr(&o));
+    assert!(!out.exists());
+    // Attached material is linted with its own line numbers too.
+    let input = f.write("diff.md", "+ // 已修复越界\n");
+    let o = f.run(&[
+        "review",
+        "--input",
+        &input,
+        "--text-ready",
+        "--no-quota",
+        "--dry-run",
+        "--strict-blind",
+    ]);
+    failure(&o);
+    assert!(
+        stderr(&o).contains(&format!("{input}:1 「已修复」")),
+        "{}",
+        stderr(&o)
+    );
+    assert!(!stderr(&o).contains("分发"), "{}", stderr(&o));
+}
+
+#[test]
+fn review_packets_carry_the_claims_are_hypotheses_instruction() {
+    let f = Fixture::new();
+    let input = f.write("diff.md", "+ fn x() {}\n");
+    let outdir = f.path("reviews");
+    let o = f.run(&[
+        "review",
+        "--input",
+        &input,
+        "--text-ready",
+        "--no-quota",
+        "--seats",
+        "1",
+        "--outdir",
+        outdir.to_str().unwrap(),
+    ]);
+    ok(&o);
+    let report = fs::read_to_string(outdir.join("impl-cli.md")).unwrap();
+    assert!(report.contains("待否证的主张，不是事实"), "{report}");
+    assert!(report.contains("+ fn x() {}"), "{report}");
+    // verify findings are model claims by design and are not linted.
+    let findings = f.write("findings.md", "| src/a.rs:1 | 我认为是真问题 |\n");
+    let o = f.run(&[
+        "verify",
+        "--findings",
+        &findings,
+        "--by",
+        "kimi-cli",
+        "--no-quota",
+        "--strict-blind",
+        "--out",
+        f.path("v.md").to_str().unwrap(),
+    ]);
+    ok(&o);
+    let verified = fs::read_to_string(f.path("v.md")).unwrap();
+    assert!(verified.contains("待否证的主张"), "{verified}");
+}

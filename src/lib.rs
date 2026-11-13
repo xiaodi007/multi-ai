@@ -1,6 +1,7 @@
 pub mod api;
 pub mod args;
 pub mod batch;
+pub mod blind;
 pub mod broker;
 pub mod canary;
 pub mod cli;
