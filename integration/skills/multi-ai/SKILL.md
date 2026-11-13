@@ -46,6 +46,10 @@ Send only material authorized for this request. Explicitly requested external pr
 
 Choose an output owned by this task; overlapping outputs fail before sending. Sequential replacement keeps history, and a failed attempt preserves the last complete report. `--resume` only reuses complete results whose identity and body hash match; a changed input, model, implementation, or corrupted cache causes another request. For a non-Git workspace, provide a meaningful `--source-id` and change it when external context changes. Unknown CLI default model identities cannot be safely cached. Use run/attempt IDs in the manifest to distinguish new calls and reused reports.
 
+## 防附和
+
+- 写代码的家族不当评审：评审/验证 delegate implement 的产物时加 `--author-run RUN_ID` 或 `--exclude-family FAMILY`。`--cwd` 工作树在账本里有实施记录时默认排除该家族；只有用户明确要求才加 `--allow-same-family`。宿主自己（Claude）写的改动，交给非 Claude 系家族评审，由宿主亲自复核外部模型的产出，不再派回同一家族。
+
 ## 实施
 
 实施委派使用本技能 runner 和 multi-ai，须在用户已授权的通路与材料范围内；不要另写厂商执行命令。评审席位规则继续适用。固定使用 `codex exec --json` 与原生 workspace-write，不提供 danger-full-access，不套外层 macOS sandbox；默认不覆盖网络配置。

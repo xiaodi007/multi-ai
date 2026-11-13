@@ -36,6 +36,7 @@ impl Args {
             "ignore-cooldown",
             "allow-dirty",
             "network",
+            "allow-same-family",
         ];
         let mut result = Self {
             raw: tokens.to_vec(),
@@ -71,7 +72,7 @@ impl Args {
                     && (i + 1 == tokens.len() || tokens[i + 1].starts_with("--"))
                 {
                     result.values.insert("thinking".into(), vec!["auto".into()]);
-                } else if ["only", "exclude"].contains(&raw) {
+                } else if ["only", "exclude", "exclude-family"].contains(&raw) {
                     let mut values = Vec::new();
                     while i + 1 < tokens.len() && !tokens[i + 1].starts_with("--") {
                         i += 1;

@@ -612,12 +612,14 @@ fn route<'a>(config: &'a Config, id: &str, legacy: bool) -> Result<&'a Route> {
             )
         })
 }
+#[allow(clippy::too_many_arguments)]
 fn eligible(
     r: &Route,
     config: &Config,
     agentic: bool,
     no_metered: bool,
     exclude: &[String],
+    families: &[String],
     legacy: bool,
 ) -> bool {
     let pools: HashSet<&str> = exclude
@@ -627,6 +629,7 @@ fn eligible(
         .collect();
     !exclude.iter().any(|id| id == &r.id || id == &r.legacy_id)
         && !pools.contains(r.pool.as_str())
+        && !families.contains(&r.family)
         && (!agentic || r.agentic)
         && (!no_metered || r.cost != "metered")
         && blocked(&r.pool).is_none()
@@ -637,6 +640,31 @@ pub fn pick_seats(
     want: usize,
     only: &[String],
     exclude: &[String],
+    agentic: bool,
+    no_metered: bool,
+    quotas: &Value,
+    legacy: bool,
+) -> Vec<Route> {
+    pick_seats_excluding_families(
+        config,
+        want,
+        only,
+        exclude,
+        &[],
+        agentic,
+        no_metered,
+        quotas,
+        legacy,
+    )
+}
+/// Seat selection that also drops every route of an excluded model family.
+#[allow(clippy::too_many_arguments)]
+pub fn pick_seats_excluding_families(
+    config: &Config,
+    want: usize,
+    only: &[String],
+    exclude: &[String],
+    families: &[String],
     agentic: bool,
     no_metered: bool,
     quotas: &Value,
@@ -654,25 +682,29 @@ pub fn pick_seats(
     };
     let mut seen = HashSet::new();
     candidates.retain(|r| {
-        eligible(r, config, agentic, no_metered, exclude, legacy) && seen.insert(r.pool.clone())
+        eligible(r, config, agentic, no_metered, exclude, families, legacy)
+            && seen.insert(r.pool.clone())
     });
     candidates.truncate(want);
     candidates
 }
+#[allow(clippy::too_many_arguments)]
 fn backups(
     config: &Config,
     used: &[Route],
     exclude: &[String],
+    families: &[String],
     agentic: bool,
     no_metered: bool,
     quotas: &Value,
     legacy: bool,
 ) -> Vec<Route> {
-    let mut all = pick_seats(
+    let mut all = pick_seats_excluding_families(
         config,
         config.routes.len(),
         &[],
         exclude,
+        families,
         agentic,
         no_metered,
         quotas,
@@ -1813,6 +1845,8 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
     for id in &only {
         route(config, id, legacy)?;
     }
+    // Resolved before any quota collection or model call; an unknown author run fails here.
+    let families = crate::family::resolve(config, args)?.list();
     let want = if args.has("seats") {
         args.number("seats", defaults)? as usize
     } else if !only.is_empty() {
@@ -1843,10 +1877,16 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
     } else {
         collect_quotas().await?
     };
-    let seats = pick_seats(
-        config, want, &only, &exclude, agentic, no_metered, &quotas, legacy,
+    let seats = pick_seats_excluding_families(
+        config, want, &only, &exclude, &families, agentic, no_metered, &quotas, legacy,
     );
     if seats.is_empty() {
+        if !families.is_empty() {
+            eprintln!(
+                "已排除模型家族 {}；被排除家族的通路不能入席",
+                families.join(",")
+            );
+        }
         eprintln!("没有可用席位；查看multi-ai status。未冷却不代表已验证健康。");
         if let Some(c) = ctx {
             c.finish(1)?;
@@ -1854,7 +1894,7 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
         return Ok(1);
     }
     let mut queue = VecDeque::from(backups(
-        config, &seats, &exclude, agentic, no_metered, &quotas, legacy,
+        config, &seats, &exclude, &families, agentic, no_metered, &quotas, legacy,
     ));
     eprintln!(
         "分发（{kind}，目标 {want} 席）：{}",
@@ -1870,7 +1910,7 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
     if kind == "review" {
         eprintln!("复核只附需求、契约和diff，不附实施结论或任务卡。");
     }
-    if kind == "verify" && exclude.is_empty() {
+    if kind == "verify" && exclude.is_empty() && families.is_empty() {
         eprintln!("验证须 --exclude 出具方及同额度池，避免自己验证自己。");
     }
     for r in &seats {
@@ -1953,7 +1993,9 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
             {
                 while let Some(next) = queue.pop_front() {
                     if attempted.insert(next.id.clone())
-                        && eligible(&next, config, agentic, no_metered, &exclude, legacy)
+                        && eligible(
+                            &next, config, agentic, no_metered, &exclude, &families, legacy,
+                        )
                     {
                         eprintln!("↳ 立即换 {}（pool={}）", next.id, next.pool);
                         jobs.push(job(config, next, args, &prompt, &ctx, legacy));
@@ -2038,10 +2080,19 @@ async fn verify(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
         bail!("发现文件为空");
     }
     let exclude = args.all("exclude");
+    let families = crate::family::resolve(config, args)?.list();
     let r = if let Some(by) = args.get("by") {
         let r = route(config, by, legacy)?;
-        if !eligible(r, config, false, args.has("no-metered"), &exclude, legacy) {
-            eprintln!("指定验证者与出具方共池、被排除或当前冷却中");
+        if !eligible(
+            r,
+            config,
+            false,
+            args.has("no-metered"),
+            &exclude,
+            &families,
+            legacy,
+        ) {
+            eprintln!("指定验证者与出具方共池或同家族、被排除或当前冷却中");
             ctx.finish(1)?;
             return Ok(1);
         }
@@ -2052,11 +2103,12 @@ async fn verify(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
         } else {
             collect_quotas().await?
         };
-        let c = pick_seats(
+        let c = pick_seats_excluding_families(
             config,
             1,
             &[],
             &exclude,
+            &families,
             true,
             args.has("no-metered"),
             &q,
@@ -2075,8 +2127,10 @@ async fn verify(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
         r.rank,
         r.label
     );
-    if exclude.is_empty() {
-        eprintln!("未声明出具方，请明确 --exclude；模型判定不等于人工采纳。");
+    if exclude.is_empty() && families.is_empty() {
+        eprintln!(
+            "未声明出具方，请明确 --exclude、--exclude-family 或 --author-run；模型判定不等于人工采纳。"
+        );
     }
     let prompt = append_material(format!("{VERIFY_TEMPLATE}{findings}"), args)?;
     let v = run_retry(config, &r, args, &prompt, &ctx, legacy).await?;

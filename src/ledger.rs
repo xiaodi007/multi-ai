@@ -6,7 +6,7 @@ pub(crate) fn tracked(command: &str) -> bool {
     matches!(command, "delegate" | "batch" | "review" | "run" | "verify")
 }
 
-fn ledger_file() -> Option<PathBuf> {
+pub(crate) fn ledger_file() -> Option<PathBuf> {
     match env::var_os("AI_LEDGER_FILE") {
         Some(v) if v.is_empty() || v == "off" => None,
         Some(v) => Some(PathBuf::from(v)),

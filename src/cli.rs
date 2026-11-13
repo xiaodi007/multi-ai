@@ -82,6 +82,9 @@ fn command_options(command: &str, implement: bool) -> Option<&'static [&'static 
             "resume",
             "source-id",
             "no-quota",
+            "exclude-family",
+            "author-run",
+            "allow-same-family",
         ],
         "verify" => &[
             "task-type",
@@ -102,6 +105,9 @@ fn command_options(command: &str, implement: bool) -> Option<&'static [&'static 
             "source-id",
             "no-metered",
             "no-quota",
+            "exclude-family",
+            "author-run",
+            "allow-same-family",
         ],
         "probe" => &["only", "timeout"],
         "stats" => &["state-dir", "task-type"],
@@ -208,7 +214,7 @@ fn help_app() -> Command {
         ),
         (
             "review",
-            "并行复核；--kind review|explore|verify；按额度池备援",
+            "并行复核；--kind review|explore|verify；按额度池备援；--exclude-family/--author-run 排除实施方家族",
         ),
         ("dispatch", "review 的兼容同义入口"),
         ("verify", "复核 --findings FILE"),
@@ -320,7 +326,7 @@ fn print_help(topic: Option<&str>, legacy: Option<&str>) -> Result<()> {
         );
     } else {
         println!(
-            "示例：\n  multi-ai routes --json\n  multi-ai run kimi-k3-cli --prompt-file evidence.md --cwd /path/to/repo --out review.md\n  multi-ai review --input evidence.md --text-ready --outdir reviews --seats 2\n  multi-ai verify --findings review.md --cwd /path/to/repo --out verify.md\n  multi-ai text glm --input evidence.md --out answer.md\n\nrun/review/verify：--timeout、--headers-timeout、--idle-timeout 单位秒。\n--only ROUTE… / --exclude ROUTE…；--no-metered；--agentic；--resume。\nAPI只读实际附带的正文，不能读取cwd路径；客户原件仅在明确授权范围使用。\n反馈：multi-ai feedback --run UUID --report ATTEMPT-ID --accepted N --evidence TEXT\n  [--false-positive N --duplicate N --uncertain N --screen-min N --rework-min N]\n实施反馈：[--outcome merged|merged-after-rework|discarded --rework-items N --rework-rounds N --defect-tags tag1,tag2]\n批量反馈：multi-ai feedback --batch OUTDIR --from verdicts.tsv（id accepted false_positive uncertain evidence；Tab分隔；可选 screen_min rework_min outcome rework_items rework_rounds defect_tags）\nrun/review/verify/batch/delegate 接受 --task-type X 与可选 --card CARD；run --canary-file FILE 接收本地已知答案 JSON 数组，不发送给模型。\n默认source=agent；人工决定需 --source human --human-confirmed 与明确用户证据。\n顺序复用自动保留历史；同输出并发立即失败；旧引擎缓存失配可能重新请求。\nreview --dry-run 保留额度采集行为；需要纯离线检查使用 routes 或 doctor。"
+            "示例：\n  multi-ai routes --json\n  multi-ai run kimi-k3-cli --prompt-file evidence.md --cwd /path/to/repo --out review.md\n  multi-ai review --input evidence.md --text-ready --outdir reviews --seats 2\n  multi-ai verify --findings review.md --cwd /path/to/repo --out verify.md\n  multi-ai text glm --input evidence.md --out answer.md\n\nrun/review/verify：--timeout、--headers-timeout、--idle-timeout 单位秒。\n--only ROUTE… / --exclude ROUTE…；--no-metered；--agentic；--resume。\nreview/verify：--exclude-family FAMILY… / --author-run RUN_ID 排除实施方家族；账本里 --cwd 有实施记录时默认排除，--allow-same-family 放开。\nAPI只读实际附带的正文，不能读取cwd路径；客户原件仅在明确授权范围使用。\n反馈：multi-ai feedback --run UUID --report ATTEMPT-ID --accepted N --evidence TEXT\n  [--false-positive N --duplicate N --uncertain N --screen-min N --rework-min N]\n实施反馈：[--outcome merged|merged-after-rework|discarded --rework-items N --rework-rounds N --defect-tags tag1,tag2]\n批量反馈：multi-ai feedback --batch OUTDIR --from verdicts.tsv（id accepted false_positive uncertain evidence；Tab分隔；可选 screen_min rework_min outcome rework_items rework_rounds defect_tags）\nrun/review/verify/batch/delegate 接受 --task-type X 与可选 --card CARD；run --canary-file FILE 接收本地已知答案 JSON 数组，不发送给模型。\n默认source=agent；人工决定需 --source human --human-confirmed 与明确用户证据。\n顺序复用自动保留历史；同输出并发立即失败；旧引擎缓存失配可能重新请求。\nreview --dry-run 保留额度采集行为；需要纯离线检查使用 routes 或 doctor。"
         );
     }
     Ok(())

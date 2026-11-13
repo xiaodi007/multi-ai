@@ -8,6 +8,7 @@ pub mod config;
 pub mod consensus;
 pub mod delegate;
 pub mod delegate_cli;
+pub mod family;
 mod hooks;
 pub mod implement;
 mod ledger;

@@ -398,3 +398,20 @@ multi-ai outcome suggest --all --into main --apply
 - 其它情形给 `unknown`，保留可得证据；绝不猜 `merged-after-rework`。无法区分返工时需宿主自行判断并用 `feedback` 录入。
 
 这些是建议，不是代码内容等价性证明：同一文件中其它人的修改也会命中文件判据，单次提交内的返工无法识别；squash/cherry-pick、分支重建、改写历史、提交时间不可信、修改后又恢复都会降低判定能力。不会用 reflog 或联网找回历史。旧 status 没有分支字段、detached HEAD、工作树/仓库已删除、Git 不可用、REF 无效或报告损坏时降级为 `unknown`。本次新增分支记录，不按当前分支冒认旧运行身份。此功能没有强制录分门禁。
+
+## 防模型互相附和（2026-11-13）
+
+多模型互评时，评委会附和宿主或同家族模型的判断。下面的开关针对这一点；研究依据与取舍见 [任务记录](docs/tasks/2026-11-13-anti-sycophancy.md)。
+
+### 评审按模型家族排除
+
+```sh
+multi-ai review --input diff.md --text-ready --outdir reviews --exclude-family openai
+multi-ai review --cwd WORKTREE --outdir reviews --author-run RUN_ID
+multi-ai verify --findings reviews/kimi.md --cwd WORKTREE --out verified.md --author-run RUN_ID
+```
+
+- `--exclude-family FAMILY…`：排除该家族的全部通路（家族见 `routes` 的 FAMILY 列；可写多个或逗号分隔）。备援也不会补入被排除的家族；`--only` 只点了被排除家族时，没有席位并退出 1。
+- `--author-run RUN_ID`：从状态目录 `runs/RUN_ID`（可给唯一前缀）的 manifest、status 与 attempt 元数据查出实施方家族并排除；查不到即在调用模型前报错。
+- 默认：`--cwd` 所在工作树（Git 顶层）在账本（`AI_LEDGER_FILE`，默认 `~/.local/state/ai-ledger/events.jsonl`）里有 `delegate implement ROUTE` 记录时，排除该通路的家族，并在 stderr 说明；`--allow-same-family` 只放开这一默认，显式 `--exclude-family`/`--author-run` 仍生效。
+- `verify --by ROUTE` 指定的验证者属于被排除家族时直接退出 1。
