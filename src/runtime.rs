@@ -477,7 +477,8 @@ impl OutputContext {
         let cached = result["cached"].as_bool().unwrap_or(false);
         let mut result = result.clone();
         self.annotate(&mut result, content);
-        attempt.update(json!({"task_type":self.task_type,"canary_hits":result["canary_hits"],"canary_total":result["canary_total"]}))?;
+        attempt.update(json!({"task_type":self.task_type,"canary_hits":result["canary_hits"],"canary_total":result["canary_total"],
+            "decoy_total":result["decoy_total"],"decoy_agreed":result["decoy_agreed"],"decoy_resisted":result["decoy_resisted"]}))?;
         let row = json!({"attempt_id":attempt.id,"run_id":self.run_id,"path":attempt.dir.join("report.md"),
             "report_sha256":sha256(content.as_bytes()),"result":result,"cached":cached,
             "model_calls":if cached {0}else{1}});
@@ -500,7 +501,8 @@ impl OutputContext {
                     "counts":{"accepted":null,"false-positive":null,"duplicate":null,"uncertain":null},
                     "timing":{"screen-min":null,"rework-min":null},
                     "canary_hits":result["canary_hits"],"canary_total":result["canary_total"],
-                    "evidence":result["canary_results"],"created_at":Utc::now().to_rfc3339()
+                    "decoy_total":result["decoy_total"],"decoy_agreed":result["decoy_agreed"],"decoy_resisted":result["decoy_resisted"],
+                    "evidence":result["canary_results"],"decoy_evidence":result["decoy_results"],"created_at":Utc::now().to_rfc3339()
                 }),
             )?;
         }
@@ -509,7 +511,15 @@ impl OutputContext {
     pub fn annotate(&self, result: &mut Value, content: &str) {
         result["task_type"] = json!(self.task_type);
         if let Some(fields) = result.as_object_mut() {
-            for key in ["canary_hits", "canary_total", "canary_results"] {
+            for key in [
+                "canary_hits",
+                "canary_total",
+                "canary_results",
+                "decoy_total",
+                "decoy_agreed",
+                "decoy_resisted",
+                "decoy_results",
+            ] {
                 fields.remove(key);
             }
         }

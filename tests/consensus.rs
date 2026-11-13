@@ -4,9 +4,13 @@ use std::{path::Path, process::Command};
 #[test]
 fn disagreements_come_first_and_locations_align_by_suffix_and_nearby_lines() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/consensus");
+    // consensus reads local sycophancy rates; never let it see a real state directory.
+    let state = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_multi-ai"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
+        .env("HOME", state.path())
+        .env("MULTI_AI_STATE_DIR", state.path())
         .arg("consensus")
         .args(["grok.md", "kimi.md", "codex.md"].map(|f| fixtures.join(f)))
         .arg("--json")
@@ -37,6 +41,8 @@ fn disagreements_come_first_and_locations_align_by_suffix_and_nearby_lines() {
     );
     let one = Command::new(env!("CARGO_BIN_EXE_multi-ai"))
         .env_clear()
+        .env("HOME", state.path())
+        .env("MULTI_AI_STATE_DIR", state.path())
         .arg("consensus")
         .arg(fixtures.join("grok.md"))
         .output()

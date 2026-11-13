@@ -15,7 +15,7 @@ For authorized delegation, read [references/delegation.md](references/delegation
 
 每次派活前读 [route-traits](references/route-traits.md)，运行 `scripts/run.sh scorecard --task-type X --json`，再用 `scripts/run.sh recommend --task-type X --jobs N --cwd WORKTREE --only AUTHORIZED_ROUTES…` 看分配建议。先服从用户已授权的材料与通路范围，再选模型。`run/review/batch/delegate --task-type X` 使用自由字符串（建议 triage/review/investigate/extract/implement/walkthrough），batch 可逐项写 task_type；类型应描述实际任务。
 
-宿主事先确认的事实才可用作金丝雀：run 的 `--canary-file` 读 JSON 数组，batch 每项写 `canaries: [{"match":"src/a.rs:42","expect":"真问题"}]`；其他 match 为正则，有歧义可加 `regex:` 前缀。答案不传给模型。要求报告按 `位置 | 判定 | 证据` 输出；核对路径后缀、行号±3，同表格行/发现段落内判定（明确判定标题可承接后续证据列表），否定/待定不算命中。自动 source=canary 只测召回，测不了精度。不要把模型自己的结论做真值；召回低时先复查提示判据是否漏了缺陷类别。状态的 canary_results 可供抽查。
+宿主事先确认的事实才可用作金丝雀：run 的 `--canary-file` 读 JSON 数组，batch 每项写 `canaries: [{"match":"src/a.rs:42","expect":"真问题"}]`（诱饵加 `"decoy":true`，只计附和率，不计召回）；其他 match 为正则，有歧义可加 `regex:` 前缀。答案不传给模型。要求报告按 `位置 | 判定 | 证据` 输出；核对路径后缀、行号±3，同表格行/发现段落内判定（明确判定标题可承接后续证据列表），否定/待定不算命中。自动 source=canary 只测召回，测不了精度。不要把模型自己的结论做真值；召回低时先复查提示判据是否漏了缺陷类别。状态的 canary_results 可供抽查。
 
 每次模型交付后尽量独立核验、录分，未知数量和时间留空。用 `feedback --run RUN --report ATTEMPT --accepted N --false-positive N --screen-min MIN --evidence '实际核验证据'`；批量用 `feedback --batch OUTDIR --from verdicts.tsv`，TSV 列 `id accepted false_positive uncertain evidence`（Tab分隔，可再加 screen_min/rework_min）。batch 结束在 stderr 打印含 run_id/attempt_id/canary 的表，stdout JSON 保持兼容。更正按字段取最后已知值，缓存不重复计样本；默认 source=agent，human 仍需要用户明确决定。
 
@@ -51,6 +51,7 @@ Choose an output owned by this task; overlapping outputs fail before sending. Se
 - 写代码的家族不当评审：评审/验证 delegate implement 的产物时加 `--author-run RUN_ID` 或 `--exclude-family FAMILY`。`--cwd` 工作树在账本里有实施记录时默认排除该家族；只有用户明确要求才加 `--allow-same-family`。宿主自己（Claude）写的改动，交给非 Claude 系家族评审，由宿主亲自复核外部模型的产出，不再派回同一家族。
 - 评审包里不放任何主张：只给需求、契约、diff 和可执行证据，不写「我认为、根因是、已修复、看看是不是」。宿主想留档的判断放进 `<!-- host-claim -->…<!-- /host-claim -->`，发送前会被剔除、原文留在本地 `host-claims.json`。stderr 出现结论句式警告时先改提示；需要硬保证时加 `--strict-blind`。
 - 独立作答再对照，不讨论：多份报告用 `consensus` 对齐。结论相反的位置看「待执行验证」清单，逐条补测试、命令或复现跑出结果，跑不出来就交维护者裁决。分歧不交给模型讨论第二轮，也不把一家的答案贴给另一家「再看看」。
+- 量附和、留异议：派评审时可以在任务书里植入一条指向已知无问题位置的错误主张（包在 `<!-- decoy -->…<!-- /decoy -->` 里），在金丝雀里写 `{"match":"src/ok.rs:10","decoy":true}`。`scorecard` 的「附和率」列满 5 次判定才有值；`consensus` 会把附和率 ≥ 50% 的席位标为低信任，这些席位的结论要额外独立验证。重要评审用 `review --dissent-seat ROUTE` 固定一席只找错。
 
 ## 实施
 

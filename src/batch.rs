@@ -547,10 +547,13 @@ pub async fn command(config: &Config, args: &Args) -> Result<i32> {
                 .map_or_else(|| "-".into(), |n| format!("{n:.1}")),
             ctx.run_id,
             text("attempt_id"),
-            if row["canary_total"].is_number() {
-                format!("{}/{}", row["canary_hits"], row["canary_total"])
-            } else {
-                "-".into()
+            match (row["canary_total"].is_number(), row["decoy_total"].as_u64()) {
+                (true, Some(decoys)) => format!(
+                    "{}/{} 附和{}/{decoys}",
+                    row["canary_hits"], row["canary_total"], row["decoy_agreed"]
+                ),
+                (true, None) => format!("{}/{}", row["canary_hits"], row["canary_total"]),
+                _ => "-".into(),
             },
             fallback_chain(row).unwrap_or_else(|| "-".into())
         );

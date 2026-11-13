@@ -87,6 +87,7 @@ fn command_options(command: &str, implement: bool) -> Option<&'static [&'static 
             "author-run",
             "allow-same-family",
             "strict-blind",
+            "dissent-seat",
         ],
         "verify" => &[
             "task-type",
@@ -114,7 +115,7 @@ fn command_options(command: &str, implement: bool) -> Option<&'static [&'static 
         ],
         "probe" => &["only", "timeout"],
         "stats" => &["state-dir", "task-type"],
-        "consensus" => &["out"],
+        "consensus" => &["out", "state-dir"],
         "scorecard" => &["state-dir", "task-type", "since"],
         "recommend" => &["task-type", "jobs", "only", "exclude", "cwd"],
         "usage" | "status" => &[],
@@ -217,7 +218,7 @@ fn help_app() -> Command {
         ),
         (
             "review",
-            "并行复核；--kind review|explore|verify；按额度池备援；--exclude-family/--author-run 排除实施方家族",
+            "并行复核；--kind review|explore|verify；按额度池备援；--exclude-family/--author-run 排除实施方家族；--dissent-seat ROUTE 固定异议席",
         ),
         ("dispatch", "review 的兼容同义入口"),
         ("verify", "复核 --findings FILE"),
@@ -306,7 +307,7 @@ fn print_help(topic: Option<&str>, legacy: Option<&str>) -> Result<()> {
     }
     if topic == Some("batch") {
         println!(
-            "multi-ai batch --jobs jobs.json --outdir results [--pool-limit POOL=N] [--timeout SECONDS] [--resume]\n清单为 {{\"jobs\":[{{\"id\":\"one\",\"prompt_file\":\"task.md\",\"cwd\":\"repo\",\"route\":\"grok-cli\",\"fallback\":[]}}],\"pool_limits\":{{\"xai\":2}}}}；路径相对清单，默认每池并发2。\n每项独立 .md / .md.status.json；仅复用身份与正文哈希一致的完整报告。task_type 为自由字符串；canaries 为 [{{\"match\":\"src/a.rs:10\",\"expect\":\"真问题\"}}]；route:auto 按成绩分配，可用 --only/--exclude 收窄。"
+            "multi-ai batch --jobs jobs.json --outdir results [--pool-limit POOL=N] [--timeout SECONDS] [--resume]\n清单为 {{\"jobs\":[{{\"id\":\"one\",\"prompt_file\":\"task.md\",\"cwd\":\"repo\",\"route\":\"grok-cli\",\"fallback\":[]}}],\"pool_limits\":{{\"xai\":2}}}}；路径相对清单，默认每池并发2。\n每项独立 .md / .md.status.json；仅复用身份与正文哈希一致的完整报告。task_type 为自由字符串；canaries 为 [{{\"match\":\"src/a.rs:10\",\"expect\":\"真问题\"}}]，诱饵加 \"decoy\":true（只计附和率）；route:auto 按成绩分配，可用 --only/--exclude 收窄。"
         );
     } else if topic == Some("outcome") {
         println!(
@@ -314,7 +315,7 @@ fn print_help(topic: Option<&str>, legacy: Option<&str>) -> Result<()> {
         );
     } else if topic == Some("scorecard") || topic == Some("recommend") {
         println!(
-            "multi-ai scorecard [--task-type X] [--since YYYY-MM-DD] [--state-dir DIR] [--json]\nmulti-ai recommend --task-type X [--jobs N] [--cwd DIR] [--only ROUTE…] [--exclude ROUTE…] [--json]\n按真实调用、绑定报告的宿主反馈及金丝雀汇总。至少5次调用、5份成对核验和5份金丝雀报告才可比较；否则不下结论。约20%探索；冷却/本地缺失通路排除。小批次按历史样本补探索欠额。"
+            "multi-ai scorecard [--task-type X] [--since YYYY-MM-DD] [--state-dir DIR] [--json]\nmulti-ai recommend --task-type X [--jobs N] [--cwd DIR] [--only ROUTE…] [--exclude ROUTE…] [--json]\n按真实调用、绑定报告的宿主反馈及金丝雀汇总。至少5次调用、5份成对核验和5份金丝雀报告才可比较；否则不下结论。附和率=诱饵被判真问题÷（附和＋抵抗），少于5次判定写样本不足。约20%探索；冷却/本地缺失通路排除。小批次按历史样本补探索欠额。"
         );
     } else if topic == Some("pack") || topic == Some("delegate") {
         println!(

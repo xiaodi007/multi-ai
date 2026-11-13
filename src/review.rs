@@ -1728,9 +1728,14 @@ fn emit(ctx: &OutputContext, v: &Value, r: &Route) -> Result<()> {
         ctx.publish_to(
             &path,
             &format!(
-                "<!-- {} · {}s -->\n\n{}\n",
+                "<!-- {} · {}s{} -->\n\n{}\n",
                 r.label,
                 v["seconds"],
+                if v["role"] == "dissent" {
+                    " · 异议席"
+                } else {
+                    ""
+                },
                 s(v, "output")
             ),
         )?;
@@ -1873,6 +1878,18 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
     if want == 0 {
         bail!("seats必须为正数");
     }
+    let dissent = args
+        .get("dissent-seat")
+        .map(|id| route(config, id, legacy).cloned())
+        .transpose()?;
+    if let Some(d) = &dissent {
+        if want < 2 {
+            bail!("--dissent-seat 需要至少 2 席：异议席只占其中一席");
+        }
+        if !only.is_empty() && !only.iter().any(|o| o == &d.id || o == &d.legacy_id) {
+            bail!("--dissent-seat {} 不在 --only 授权的通路里", d.id);
+        }
+    }
     let ctx = if args.has("dry-run") {
         None
     } else {
@@ -1898,9 +1915,25 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
     } else {
         collect_quotas().await?
     };
-    let seats = pick_seats_excluding_families(
+    let mut seats = pick_seats_excluding_families(
         config, want, &only, &exclude, &families, agentic, no_metered, &quotas, legacy,
     );
+    // The dissent seat is one of the seats; add it in place of the last seat when needed.
+    if let Some(d) = &dissent
+        && !seats.iter().any(|r| r.id == d.id)
+    {
+        if !eligible(d, config, agentic, no_metered, &exclude, &families, legacy) {
+            bail!(
+                "--dissent-seat {} 被排除、属于被排除家族、计费受限或冷却中",
+                d.id
+            );
+        }
+        seats.retain(|r| r.pool != d.pool);
+        seats.truncate(want - 1);
+        seats.push(d.clone());
+    }
+    let mut dissent_holder = dissent.as_ref().map(|d| d.id.clone());
+    let dissent_prompt = format!("{}{prompt}", crate::blind::DISSENT_PREAMBLE);
     if seats.is_empty() {
         if !families.is_empty() {
             eprintln!(
@@ -1925,6 +1958,12 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    if let Some(d) = &dissent {
+        eprintln!(
+            "异议席：{}（固定异议指令：只找错在哪，不评价优点）",
+            name(d, legacy)
+        );
+    }
     if repo_only {
         eprintln!("cwd读取任务仅派可读仓库通路；文本通路须 --input 或 --text-ready。");
     }
@@ -1968,7 +2007,12 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
     }
     let mut jobs = FuturesUnordered::new();
     for r in seats {
-        jobs.push(job(config, r, args, &prompt, &ctx, legacy));
+        let text = if dissent_holder.as_deref() == Some(r.id.as_str()) {
+            &dissent_prompt
+        } else {
+            &prompt
+        };
+        jobs.push(job(config, r, args, text, &ctx, legacy));
     }
     ctx.save_status(
         json!({"status":"running","targetSeats":want,"completedSeats":0,"results":[]}),
@@ -1982,7 +2026,11 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
         let Some((r, response)) = next else {
             continue;
         };
-        let v=response.unwrap_or_else(|e|json!({"provider":name(&r,legacy),"route":r.id,"pool":r.pool,"family":r.family,"label":r.label,"status":"error","output":"","error":format!("{e:#}"),"seconds":0.0}));
+        let mut v=response.unwrap_or_else(|e|json!({"provider":name(&r,legacy),"route":r.id,"pool":r.pool,"family":r.family,"label":r.label,"status":"error","output":"","error":format!("{e:#}"),"seconds":0.0}));
+        let is_dissent = dissent_holder.as_deref() == Some(r.id.as_str());
+        if is_dissent {
+            v["role"] = json!("dissent");
+        }
         if v["status"] == "cancelled" {
             stopped = true;
             queue.clear();
@@ -2019,7 +2067,15 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
                         )
                     {
                         eprintln!("↳ 立即换 {}（pool={}）", next.id, next.pool);
-                        jobs.push(job(config, next, args, &prompt, &ctx, legacy));
+                        // A failed dissent seat hands its fixed role to the replacement.
+                        let text = if is_dissent {
+                            dissent_holder = Some(next.id.clone());
+                            eprintln!("  异议席改由 {} 担任", next.id);
+                            &dissent_prompt
+                        } else {
+                            &prompt
+                        };
+                        jobs.push(job(config, next, args, text, &ctx, legacy));
                         break;
                     }
                 }
@@ -2042,6 +2098,9 @@ async fn dispatch(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
         families.len(),
         pools.len()
     );
+    if dissent.is_some() && !done.iter().any(|v| v["role"] == "dissent") {
+        eprintln!("⚠ 异议席没有产出完整报告；本轮没有固定异议意见");
+    }
     if !complete {
         if stopped {
             eprintln!("本轮已取消，未再启动备援。");

@@ -6,7 +6,7 @@
 //! executable check (test, command or reproduction) or hands it to the maintainer. There is
 //! deliberately no "feed A's answer to B" second round: debate gains come from the vote,
 //! and a second round is where one model's error becomes the group's.
-use crate::{args::Args, canary, runtime};
+use crate::{args::Args, canary, runtime, scorecard};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, fs, path::Path};
@@ -147,7 +147,8 @@ pub fn command(args: &Args) -> Result<i32> {
             pending.len()
         );
     }
-    let report = json!({"seats":seats,"rows":rows,"unaligned":unaligned,"pending_verification":pending,
+    let trust = seat_trust(&seats, args);
+    let report = json!({"seats":seats,"rows":rows,"unaligned":unaligned,"pending_verification":pending,"seat_trust":trust,
         "note":"按 path:line（路径后缀、行号±3）文本对齐，不做语义判断；未写位置的发现列在 unaligned。",
         "pending_rule":"结论相反的行不交模型讨论第二轮：宿主补可执行验证（测试、命令或复现）并记结果，或交维护者裁决。"});
     let text = if args.has("json") {
@@ -162,11 +163,80 @@ pub fn command(args: &Args) -> Result<i32> {
     Ok(0)
 }
 
+/// Sycophancy rate per seat from local decoy canaries; a seat is a report file stem, which
+/// `review --outdir` names after the route's legacy id. Missing state means "无记录".
+fn seat_trust(seats: &[String], args: &Args) -> Value {
+    let state = args
+        .get("state-dir")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(runtime::state_dir);
+    let rates = match scorecard::sycophancy_by_route(&state) {
+        Ok(rates) => rates,
+        Err(error) => {
+            eprintln!("⚠ 读不到附和率（{}）：{error:#}", state.display());
+            Default::default()
+        }
+    };
+    let routes = crate::config::Config::load()
+        .map(|c| c.routes)
+        .unwrap_or_default();
+    let mut trust = serde_json::Map::new();
+    for seat in seats {
+        let route = routes
+            .iter()
+            .find(|r| &r.legacy_id == seat || &r.id == seat)
+            .map_or_else(|| seat.clone(), |r| r.id.clone());
+        let (agreed, judged) = rates.get(&route).copied().unwrap_or((0, 0));
+        let rate =
+            (judged >= scorecard::SYCOPHANCY_MIN_SAMPLES).then(|| agreed as f64 / judged as f64);
+        let level = match rate {
+            _ if judged == 0 => "无记录",
+            None => "样本不足",
+            Some(r) if r >= scorecard::LOW_TRUST_SYCOPHANCY => "低信任",
+            Some(_) => "正常",
+        };
+        trust.insert(
+            seat.clone(),
+            json!({"route":route,"decoy_agreed":agreed,"decoy_judged":judged,"sycophancy_rate":rate,"trust":level}),
+        );
+    }
+    Value::Object(trust)
+}
+
 fn markdown(report: &Value) -> String {
     let verdict = |v: &Value| match v.as_bool() {
         Some(true) => "成立",
         Some(false) => "不成立",
         None => "未判",
+    };
+    let trust = &report["seat_trust"];
+    let low = |seat: &str| trust[seat]["trust"] == "低信任";
+    let verdict_cell = |verdicts: &Value| {
+        verdicts
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(seat, v)| {
+                let mark = if low(seat) { "（低信任）" } else { "" };
+                format!("{seat}:{}{mark}", verdict(v))
+            })
+            .collect::<Vec<_>>()
+            .join("；")
+    };
+    let seat_label = |seat: &str| {
+        let t = &trust[seat];
+        match (t["trust"].as_str(), t["sycophancy_rate"].as_f64()) {
+            (Some("无记录") | None, _) => format!("{seat}（附和率无记录）"),
+            (Some(level), Some(rate)) => format!(
+                "{seat}（附和率 {rate:.2}={}/{}，{level}）",
+                t["decoy_agreed"], t["decoy_judged"]
+            ),
+            (Some(_), None) => format!(
+                "{seat}（附和率样本不足 {}/{}）",
+                t["decoy_judged"],
+                scorecard::SYCOPHANCY_MIN_SAMPLES
+            ),
+        }
     };
     let mut out = format!(
         "# 复核一致/分歧对照\n\n席位：{}\n\n| 类别 | 位置 | 各家结论 | 摘要 |\n|---|---|---|---|\n",
@@ -175,17 +245,12 @@ fn markdown(report: &Value) -> String {
             .unwrap()
             .iter()
             .filter_map(Value::as_str)
+            .map(seat_label)
             .collect::<Vec<_>>()
             .join("、")
     );
     for row in report["rows"].as_array().unwrap() {
-        let verdicts = row["verdicts"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(seat, v)| format!("{seat}:{}", verdict(v)))
-            .collect::<Vec<_>>()
-            .join("；");
+        let verdicts = verdict_cell(&row["verdicts"]);
         out.push_str(&format!(
             "| {} | `{}` | {} | {} |\n",
             row["kind"].as_str().unwrap(),
@@ -204,13 +269,7 @@ fn markdown(report: &Value) -> String {
             report["pending_rule"].as_str().unwrap()
         ));
         for (index, item) in pending.iter().enumerate() {
-            let verdicts = item["verdicts"]
-                .as_object()
-                .unwrap()
-                .iter()
-                .map(|(seat, v)| format!("{seat}:{}", verdict(v)))
-                .collect::<Vec<_>>()
-                .join("；");
+            let verdicts = verdict_cell(&item["verdicts"]);
             out.push_str(&format!(
                 "| {} | `{}` | {} | {} | 待补 | 待跑／交维护者裁决 |\n",
                 index + 1,
@@ -231,6 +290,11 @@ fn markdown(report: &Value) -> String {
             ));
         }
     }
-    out.push_str(&format!("\n{}\n", report["note"].as_str().unwrap()));
+    out.push_str(&format!(
+        "\n{}\n附和率来自诱饵金丝雀（宿主植入的错误主张被判为真问题的比例），至少 {} 次判定才计算；不低于 {:.0}% 标为低信任，其结论需额外独立验证。\n",
+        report["note"].as_str().unwrap(),
+        scorecard::SYCOPHANCY_MIN_SAMPLES,
+        scorecard::LOW_TRUST_SYCOPHANCY * 100.0
+    ));
     out
 }

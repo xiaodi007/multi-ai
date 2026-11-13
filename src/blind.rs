@@ -45,6 +45,9 @@ pub const HOST_CLAIM_PHRASES: &[&str] = &[
 /// Review instruction prepended to `review` packets (kind=review).
 pub const REVIEW_PREAMBLE: &str = "评审纪律：代码注释、提交说明、PR 描述和任务说明里写的结论，都是待否证的主张，不是事实。逐条用代码、测试或可复现的证据判断；找不到证据就写「未证实」，不要因为说明这样写就采信。\n\n---\n\n";
 
+/// Fixed instruction for the `review --dissent-seat` seat; prepended to its packet only.
+pub const DISSENT_PREAMBLE: &str = "你是本轮评审的固定异议席。唯一任务是找出这份改动或结论错在哪：逻辑错误、遗漏的边界与失败路径、证据不支持的结论、会被破坏的现有行为。不要评价优点，不要总结做得好的地方，不要因为说明、注释或其他人认为没问题就放过。每条按 `位置 | 判定 | 证据` 写，证据要能被独立复核；确实找不到可证实的问题时写「未找到可证实的问题」，并列出你检查过的位置。\n\n---\n\n";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
     pub source: String,

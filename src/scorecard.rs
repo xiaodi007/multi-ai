@@ -14,6 +14,10 @@ use std::{
 };
 
 type Key = (String, String);
+/// Decoy judgments (agreed + resisted) needed before a sycophancy rate is shown.
+pub const SYCOPHANCY_MIN_SAMPLES: u64 = 5;
+/// A seat at or above this sycophancy rate is marked low-trust in consensus tables.
+pub const LOW_TRUST_SYCOPHANCY: f64 = 0.5;
 #[derive(Default)]
 struct Cell {
     calls: u64,
@@ -39,6 +43,9 @@ struct Cell {
     canary_hits: u64,
     canary_total: u64,
     canary_samples: u64,
+    decoy_agreed: u64,
+    decoy_judged: u64,
+    decoy_reports: u64,
     external_seconds: f64,
     external_accepted: u64,
     external_samples: u64,
@@ -245,6 +252,14 @@ pub fn collect(state: &Path, args: &Args) -> Result<Value> {
                     row["canary_hits"] = json!(h);
                     row["canary_total"] = json!(t);
                 }
+                if let (Some(a), Some(r)) = (
+                    event["decoy_agreed"].as_u64(),
+                    event["decoy_resisted"].as_u64(),
+                ) && a + r <= event["decoy_total"].as_u64().unwrap_or(0)
+                {
+                    row["decoy_agreed"] = json!(a);
+                    row["decoy_resisted"] = json!(r);
+                }
             }
             _ => {
                 invalid_feedback += 1;
@@ -378,6 +393,15 @@ pub fn collect(state: &Path, args: &Args) -> Result<Value> {
                 add_count(&mut cell.canary_total, t)?;
                 cell.canary_samples += 1;
             }
+            if let (Some(a), Some(r)) = (
+                feedback["decoy_agreed"].as_u64(),
+                feedback["decoy_resisted"].as_u64(),
+            ) && a + r > 0
+            {
+                add_count(&mut cell.decoy_agreed, a)?;
+                add_count(&mut cell.decoy_judged, a + r)?;
+                cell.decoy_reports += 1;
+            }
         }
     }
     let rows = cells.into_iter().map(|((route,task_type,model),mut c)| {
@@ -409,13 +433,17 @@ pub fn collect(state: &Path, args: &Args) -> Result<Value> {
             "accepted":(c.accepted_samples>0).then_some(c.accepted),"accepted_samples":c.accepted_samples,"false_positive":(c.false_positive_samples>0).then_some(c.false_positive),"false_positive_samples":c.false_positive_samples,"precision":precision,
             "precision_accepted":c.precision_accepted,"precision_false_positive":c.precision_false,
             "canary_hits":c.canary_hits,"canary_total":c.canary_total,"canary_samples":c.canary_samples,"canary_recall":recall,
-            "miss_rate":recall.map(|r|1.0-r),"median_seconds":median,"p90_seconds":p90,"timing_samples":n,
+            "miss_rate":recall.map(|r|1.0-r),
+            "decoy_agreed":c.decoy_agreed,"decoy_judged":c.decoy_judged,"decoy_reports":c.decoy_reports,
+            "sycophancy_rate":(c.decoy_judged >= SYCOPHANCY_MIN_SAMPLES).then(||c.decoy_agreed as f64/c.decoy_judged as f64),
+            "sycophancy_assessment":if c.decoy_judged >= SYCOPHANCY_MIN_SAMPLES {"可比较"} else {"样本不足"},
+            "median_seconds":median,"p90_seconds":p90,"timing_samples":n,
             "failure_rate":ratio(failed as f64,c.calls),"failure_rates":rates,"failures":c.failures,
             "external_seconds_per_accepted":ratio(c.external_seconds,c.external_accepted),"external_cost_samples":c.external_samples,"external_cost_accepted":c.external_accepted,
             "host_screen_minutes_per_accepted":ratio(c.screen_minutes,c.screen_accepted),"host_cost_samples":c.screen_samples,"host_cost_accepted":c.screen_accepted,
             "route_revisions":revisions,"boundary_warning_count":c.boundary_warnings,"attributed_boundary_count":c.attributed_boundaries,"claude_config_boundary_count":c.config_boundaries});
         if implementation {
-            for key in ["precision", "precision_accepted", "precision_false_positive", "accepted", "accepted_samples", "false_positive", "false_positive_samples", "canary_hits", "canary_total", "canary_samples", "canary_recall", "miss_rate", "external_seconds_per_accepted", "host_screen_minutes_per_accepted"] {row.as_object_mut().unwrap().remove(key);}
+            for key in ["precision", "precision_accepted", "precision_false_positive", "accepted", "accepted_samples", "false_positive", "false_positive_samples", "canary_hits", "canary_total", "canary_samples", "canary_recall", "miss_rate", "external_seconds_per_accepted", "host_screen_minutes_per_accepted", "decoy_agreed", "decoy_judged", "decoy_reports", "sycophancy_rate", "sycophancy_assessment"] {row.as_object_mut().unwrap().remove(key);}
             let merged = *c.outcomes.get("merged").unwrap_or(&0);
             let reworked = *c.outcomes.get("merged-after-rework").unwrap_or(&0);
             row["outcome_samples"] = json!(c.outcome_samples);
@@ -438,6 +466,25 @@ pub fn collect(state: &Path, args: &Args) -> Result<Value> {
     )
 }
 
+/// Decoy outcomes per route across task types: (agreed, judged).
+pub fn sycophancy_by_route(state: &Path) -> Result<BTreeMap<String, (u64, u64)>> {
+    let report = collect(state, &Args::default())?;
+    let mut totals = BTreeMap::<String, (u64, u64)>::new();
+    for cell in report["cells"].as_array().into_iter().flatten() {
+        let (Some(route), Some(agreed), Some(judged)) = (
+            cell["route"].as_str(),
+            cell["decoy_agreed"].as_u64(),
+            cell["decoy_judged"].as_u64(),
+        ) else {
+            continue;
+        };
+        let entry = totals.entry(route.to_owned()).or_default();
+        entry.0 += agreed;
+        entry.1 += judged;
+    }
+    Ok(totals)
+}
+
 pub fn command(args: &Args) -> Result<i32> {
     let state = args
         .get("state-dir")
@@ -454,10 +501,20 @@ pub fn command(args: &Args) -> Result<i32> {
             .any(|c| c["task_type"] != "implement")
         {
             runtime::stdout_line(format_args!(
-                "ROUTE\tTASK TYPE\tMODEL\tN\tPRECISION\tCANARY\tMEDIAN s\tP90 s\tFAIL RATE (quota/rate/capacity/timeout)\tEXT s/accepted\tHOST min/accepted\tASSESSMENT"
+                "ROUTE\tTASK TYPE\tMODEL\tN\tPRECISION\tCANARY\t附和率\tMEDIAN s\tP90 s\tFAIL RATE (quota/rate/capacity/timeout)\tEXT s/accepted\tHOST min/accepted\tASSESSMENT"
             ))?;
         }
         let metric = |v: &Value| v.as_f64().map_or_else(|| "-".into(), |n| format!("{n:.3}"));
+        let sycophancy = |row: &Value| match row["sycophancy_rate"].as_f64() {
+            Some(rate) => format!(
+                "{rate:.3} ({}/{})",
+                row["decoy_agreed"], row["decoy_judged"]
+            ),
+            None => format!(
+                "样本不足 ({}/{SYCOPHANCY_MIN_SAMPLES})",
+                row["decoy_judged"]
+            ),
+        };
         let assessment = |row: &Value| {
             let label = row["assessment"].as_str().unwrap_or("-");
             let missing = row["assessment_missing"].as_array().map(|m| {
@@ -494,7 +551,7 @@ pub fn command(args: &Args) -> Result<i32> {
                 continue;
             }
             runtime::stdout_line(format_args!(
-                "{}\t{}\t{}\t{}\t{}\t{}/{}\t{}\t{}\t{} ({}/{}/{}/{})\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}/{}\t{}\t{}\t{}\t{} ({}/{}/{}/{})\t{}\t{}\t{}",
                 row["route"].as_str().unwrap(),
                 row["task_type"].as_str().unwrap_or("-"),
                 // Cells are keyed by model too; without it same-route rows look duplicated.
@@ -503,6 +560,7 @@ pub fn command(args: &Args) -> Result<i32> {
                 metric(&row["precision"]),
                 row["canary_hits"],
                 row["canary_total"],
+                sycophancy(row),
                 metric(&row["median_seconds"]),
                 metric(&row["p90_seconds"]),
                 metric(&row["failure_rate"]),
