@@ -95,6 +95,15 @@ CLI 身份检查在 cwd 位于 HOME 内时，祖先配置发现到 HOME 为止�
 
 CLI 配置身份发现受工作树根和 HOME 约束；cwd 不在 HOME 下时只发现 cwd 项目配置和显式用户配置，避免隔离 HOME 的夹具继承其外侧宿主配置。多个配置模型冲突时保守 unknown，routes 展示与执行使用同一解析器。
 
+# v0.2.2 增量（2026-11-13）
+
+不改既有输出语义与单位；新增均为可选开关、新字段或 stderr 提示。
+
+- review/verify 新增 `--exclude-family`、`--author-run`、`--allow-same-family`；`--cwd` 所在工作树同分支在账本里有 implement 记录时，默认排除实施方家族（stderr 说明）。
+- run/review/verify 发送前对宿主结论句式做 lint（只警告），`--strict-blind` 命中即退出；`<!-- host-claim -->` 段发送前剔除，原文写入 `runs/RUN/host-claims.json`。review 默认指令与 verify 模板各加一句「注释、提交说明、PR 描述是待否证的主张」。
+- consensus 新增「待执行验证（结论相反）」清单与 JSON `pending_verification`，并按通路标附和率、≥50% 标低信任。
+- canary 支持 `"decoy": true`（不计入召回）；scorecard 新增附和率列；review 新增 `--dissent-seat ROUTE`。
+
 # 委派 CLI 门禁（2026-11-11，包版本仍为 0.2.1）
 
 受限委派接受的厂商 CLI 改为 Kimi `2.5.3`、Grok `1.0.77 (50ca579fa996)`。其它版本仍停止委派，`run` / `review` 不受这道门影响。Kimi 委派允许的 managed 别名增加 `k3.1-pro` 与 `k3.1-pro-highspeed`（100 万上下文，effort 与 `k3` 相同）。验收记录见 `docs/CLI-ISOLATION.md`。

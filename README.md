@@ -75,7 +75,7 @@ gh repo clone xiaodi007/multi-ai
 cd multi-ai
 cargo test --locked
 ./scripts/package.sh
-cd dist/multi-ai-0.2.1-aarch64-apple-darwin
+cd dist/multi-ai-0.2.2-aarch64-apple-darwin
 ./install.sh --no-legacy-aliases
 ./install-skills.sh --upgrade
 ```
