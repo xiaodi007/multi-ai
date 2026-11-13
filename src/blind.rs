@@ -4,6 +4,8 @@
 //! are removed before sending while the original stays in the local run directory.
 //! `<!-- decoy -->` blocks keep their text but lose the markers, so a planted decoy claim
 //! reaches the model without revealing itself and is not reported by the lint.
+//! Markers are honoured only in the host's own prompt; attached `--input` evidence is
+//! linted but sent byte for byte, and `verify --findings` is neither linted nor rewritten.
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::{fs, path::Path};
@@ -140,6 +142,13 @@ impl Report {
             bail!("{source}:{start} 的 {marker} 没有闭合；未发送");
         }
         Ok(out)
+    }
+
+    /// Attached evidence is linted but never rewritten: markers there are content.
+    pub fn lint_only(&mut self, source: &str, text: &str) {
+        for (index, line) in text.lines().enumerate() {
+            self.lint_line(source, index + 1, line);
+        }
     }
 
     fn lint_line(&mut self, source: &str, line: usize, text: &str) {
@@ -280,5 +289,9 @@ mod tests {
         let mut quiet = Report::default();
         quiet.take("a", "我认为没问题\n", false).unwrap();
         assert!(quiet.hits.is_empty());
+        let mut evidence = Report::default();
+        evidence.lint_only("diff.md", "ok\n+ // 已修复 <!-- host-claim -->\n");
+        assert_eq!(evidence.hits.len(), 1);
+        assert_eq!(evidence.hits[0].line, 2);
     }
 }

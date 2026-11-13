@@ -1026,8 +1026,9 @@ fn numeric(args: &Args, key: &str, default: f64) -> Result<f64> {
     }
     Ok(v)
 }
-/// Assemble the outgoing prompt: host-claim blocks are removed, decoy markers dropped and
-/// host-conclusion phrasing linted per source line (`lint_base=false` for model findings).
+/// Assemble the outgoing prompt: in the host prompt, host-claim blocks are removed, decoy
+/// markers dropped and conclusions linted; attached materials are linted but sent verbatim.
+/// `lint_base=false` (verify findings) sends the base untouched.
 fn append_material(
     base_source: &str,
     base: String,
@@ -1035,14 +1036,18 @@ fn append_material(
     args: &Args,
 ) -> Result<(String, crate::blind::Report)> {
     let mut report = crate::blind::Report::default();
-    let mut prompt = report.take(base_source, &base, lint_base)?;
+    let mut prompt = if lint_base {
+        report.take(base_source, &base, true)?
+    } else {
+        base
+    };
     for file in args.all("input") {
         let path = fs::canonicalize(&file).with_context(|| format!("读取材料 {file}"))?;
         let text = fs::read_to_string(&path)?;
         if text.trim().is_empty() {
             bail!("材料为空：{}", path.display());
         }
-        let text = report.take(&file, &text, true)?;
+        report.lint_only(&file, &text);
         prompt.push_str(&format!(
             "\n\n--- 附带材料：{} ---\n{text}",
             path.file_name().unwrap_or_default().to_string_lossy()
@@ -2213,7 +2218,7 @@ async fn verify(config: &Config, args: &Args, legacy: bool) -> Result<i32> {
             "未声明出具方，请明确 --exclude、--exclude-family 或 --author-run；模型判定不等于人工采纳。"
         );
     }
-    // Findings are another model's claims by design: stripped of markers but not linted.
+    // Findings are another model's claims by design: sent untouched and not linted.
     let (body, blind) = append_material("findings", findings, false, args)?;
     blind.check(args.has("strict-blind"))?;
     blind.save(&ctx.dir)?;

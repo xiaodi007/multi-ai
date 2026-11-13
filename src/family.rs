@@ -6,12 +6,12 @@
 use crate::{
     args::Args,
     config::{Config, Route},
-    runtime, stats,
+    runtime,
 };
 use anyhow::{Result, bail};
 use serde_json::Value;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -101,12 +101,18 @@ pub fn run_families(state: &Path, run_id: &str, routes: &[Route]) -> Result<BTre
             ),
         }
     };
-    let (records, _) = stats::records(state)?;
+    // Only this run: its manifest (reports, status, fallbacks) and attempt metadata.
+    let manifest: Value = serde_json::from_slice(&fs::read(dir.join("manifest.json"))?)?;
     let mut families = BTreeSet::new();
-    if let Some(run) = records.iter().find(|r| r.directory == dir) {
-        collect_families(&run.manifest, routes, &mut families);
-        for attempt in &run.attempts {
-            collect_families(attempt, routes, &mut families);
+    collect_families(&manifest, routes, &mut families);
+    if let Some(progress) = manifest["outputs"]["progress"].as_str() {
+        let progress = dir.join(progress);
+        for child in fs::read_dir(&progress).into_iter().flatten().flatten() {
+            if let Ok(bytes) = fs::read(child.path().join("metadata.json"))
+                && let Ok(metadata) = serde_json::from_slice::<Value>(&bytes)
+            {
+                collect_families(&metadata, routes, &mut families);
+            }
         }
     }
     if families.is_empty() {
@@ -117,11 +123,9 @@ pub fn run_families(state: &Path, run_id: &str, routes: &[Route]) -> Result<BTre
     Ok(families)
 }
 
-fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let mut command = Command::new("git");
-    command
-        .current_dir(dir)
-        .args(["rev-parse", "--show-toplevel"]);
+    command.current_dir(dir).args(args);
     for (key, _) in env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             command.env_remove(key);
@@ -129,24 +133,33 @@ fn git_toplevel(dir: &Path) -> Option<PathBuf> {
     }
     let out = command.output().ok().filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    (!text.is_empty()).then(|| PathBuf::from(text))
+    (!text.is_empty()).then_some(text)
+}
+
+/// Current branch name; detached HEAD or a non-Git directory gives None.
+fn branch_of(dir: &Path) -> Option<String> {
+    git(dir, &["symbolic-ref", "-q", "--short", "HEAD"])
 }
 
 /// The worktree a path belongs to: Git top level when available, else the path itself.
 pub fn worktree_of(dir: &Path) -> PathBuf {
     let canonical = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    git_toplevel(&canonical)
+    git(&canonical, &["rev-parse", "--show-toplevel"])
         .and_then(|p| fs::canonicalize(&p).ok())
         .unwrap_or(canonical)
 }
 
 /// Families of `delegate implement ROUTE` starts recorded in the ledger for this worktree.
+/// When both the record and the worktree name a branch, they must match: a worktree path
+/// reused for later work on another branch does not inherit an old implementer.
 pub fn ledger_implement_families(
     ledger: &Path,
     worktree: &Path,
     routes: &[Route],
 ) -> BTreeSet<String> {
     let text = fs::read_to_string(ledger).unwrap_or_default();
+    let branch = branch_of(worktree);
+    let mut trees = HashMap::<String, PathBuf>::new();
     let mut families = BTreeSet::new();
     for event in text
         .lines()
@@ -163,7 +176,18 @@ pub fn ledger_implement_families(
         let Some(cwd) = event["cwd"].as_str() else {
             continue;
         };
-        if worktree_of(Path::new(cwd)) != worktree {
+        let tree = trees
+            .entry(cwd.to_owned())
+            .or_insert_with(|| worktree_of(Path::new(cwd)));
+        if tree != worktree {
+            continue;
+        }
+        let recorded = event["branch"]
+            .as_str()
+            .filter(|b| !b.is_empty() && *b != "HEAD");
+        if let (Some(recorded), Some(current)) = (recorded, branch.as_deref())
+            && recorded != current
+        {
             continue;
         }
         if let Some(family) = route_family(routes, route) {
@@ -271,6 +295,37 @@ mod tests {
             ledger_implement_families(&ledger, &worktree_of(&tree.join("nope")), &routes)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn ledger_default_ignores_other_branches_of_a_reused_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let tree = temp.path().join("repo");
+        fs::create_dir_all(&tree).unwrap();
+        let ok = Command::new("git")
+            .current_dir(&tree)
+            .args(["init", "-q", "-b", "feature"])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            return; // without git the branch filter cannot apply either
+        }
+        let ledger = temp.path().join("events.jsonl");
+        let lines = [
+            json!({"event":"start","what":"delegate implement impl-cli","task_type":"implement","cwd":tree,"branch":"main"}),
+            json!({"event":"start","what":"delegate implement other-cli","task_type":"implement","cwd":tree,"branch":"feature"}),
+        ];
+        fs::write(
+            &ledger,
+            lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let families = ledger_implement_families(&ledger, &worktree_of(&tree), &routes());
+        assert_eq!(families.into_iter().collect::<Vec<_>>(), ["kimi"]);
     }
 
     #[test]

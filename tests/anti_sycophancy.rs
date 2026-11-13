@@ -328,6 +328,29 @@ fn host_claims_are_stripped_kept_locally_and_conclusions_warned() {
         "宿主私下判断：缓存键冲突。"
     );
     assert_eq!(saved[0]["lint"][0]["line"], 5);
+    // Attached evidence is linted but never rewritten, even if it contains markers.
+    let evidence = f.write(
+        "readme-diff.md",
+        "+ 用 `<!-- host-claim -->…<!-- /host-claim -->` 包住判断\n",
+    );
+    let out = f.path("answer2.md");
+    let o = f.run(&[
+        "run",
+        "impl-cli",
+        "--prompt",
+        "评审附带的文档改动",
+        "--input",
+        &evidence,
+        "--text-ready",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    ok(&o);
+    let sent = fs::read_to_string(&out).unwrap();
+    assert!(
+        sent.contains("+ 用 `<!-- host-claim -->…<!-- /host-claim -->` 包住判断"),
+        "{sent}"
+    );
 }
 
 #[test]
