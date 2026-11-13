@@ -404,3 +404,51 @@ fn review_packets_carry_the_claims_are_hypotheses_instruction() {
     let verified = fs::read_to_string(f.path("v.md")).unwrap();
     assert!(verified.contains("待否证的主张"), "{verified}");
 }
+
+// ---- 3. disagreements become a pending-verification list --------------------------------
+
+#[test]
+fn consensus_lists_opposite_verdicts_for_executable_verification() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/consensus");
+    let reports = ["grok.md", "kimi.md", "codex.md"].map(|f| fixtures.join(f));
+    let json_out = Command::new(binary())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .arg("consensus")
+        .args(&reports)
+        .arg("--json")
+        .output()
+        .unwrap();
+    ok(&json_out);
+    let report: Value = serde_json::from_slice(&json_out.stdout).unwrap();
+    let pending = report["pending_verification"].as_array().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["location"], "repo/src/a.rs:44");
+    assert_eq!(pending[0]["verdicts"]["grok"], true);
+    assert!(pending[0]["verification"].is_null());
+    assert!(stderr(&json_out).contains("1 处结论相反"));
+    let md = Command::new(binary())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .arg("consensus")
+        .args(&reports)
+        .output()
+        .unwrap();
+    ok(&md);
+    let text = String::from_utf8_lossy(&md.stdout);
+    assert!(text.contains("## 待执行验证（结论相反）"), "{text}");
+    assert!(text.contains("不交模型讨论第二轮"), "{text}");
+    assert!(
+        text.contains("| 1 | `repo/src/a.rs:44` | grok:成立；kimi:不成立 |"),
+        "{text}"
+    );
+    // Agreeing reports produce an explicit empty list, not a missing section.
+    let agree = Command::new(binary())
+        .env_clear()
+        .arg("consensus")
+        .args([fixtures.join("grok.md"), fixtures.join("codex.md")])
+        .output()
+        .unwrap();
+    ok(&agree);
+    assert!(String::from_utf8_lossy(&agree.stdout).contains("没有结论相反的位置"));
+}

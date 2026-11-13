@@ -421,3 +421,7 @@ multi-ai verify --findings reviews/kimi.md --cwd WORKTREE --out verified.md --au
 - `run/review/verify` 发送前逐行扫描提示与每份 `--input`：命中「我认为、应该是、已修复、根因是、确认一下、看看是不是」等宿主结论句式（完整表见 `src/blind.rs` 的 `HOST_CLAIM_PHRASES`）时，在 stderr 列出 `文件:行号` 与原句，不拦截。`--strict-blind` 时命中即退出，不发送任何请求。`verify --findings` 本来就是别人的主张，不扫描。
 - `<!-- host-claim -->…<!-- /host-claim -->` 段在发送前剔除（可跨行、可在行内）；原文与 lint 结果写入本地运行目录 `runs/RUN/host-claims.json`，供宿主事后对照模型是否独立得出同样结论。标记未闭合或多余闭合标记一律报错，不发送。
 - `review`（kind=review）默认在提示前加一句：代码注释、提交说明、PR 描述和任务说明里的结论都是待否证的主张，不是事实。`verify` 模板的纪律里也加了同一条。这会改变提示哈希，旧缓存不再复用。
+
+### 分歧交给可执行验证，不交第二轮讨论
+
+`consensus` 在原表之外输出「待执行验证（结论相反）」清单（JSON 为 `pending_verification`，含空的 `verification/result/decided_by` 字段），并在 stderr 提示条数。每一行由宿主补一个可执行的验证（测试、命令或复现）并记结果，或交维护者裁决。本工具不提供「把 A 的答案喂给 B 再讨论」的功能：辩论的收益主要来自多数投票，第二轮恰是个人错误变成集体错误的高发点。

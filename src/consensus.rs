@@ -2,6 +2,10 @@
 //! Findings are aligned by `path:line` (path suffix, line ±3), the same text matching the
 //! canaries use; it is not a semantic judge. Disagreements are listed first: opposite
 //! verdicts on one location are what the host should check before anything else.
+//! Each opposite-verdict row is also listed as pending verification: the host adds an
+//! executable check (test, command or reproduction) or hands it to the maintainer. There is
+//! deliberately no "feed A's answer to B" second round: debate gains come from the vote,
+//! and a second round is where one model's error becomes the group's.
 use crate::{args::Args, canary, runtime};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -129,8 +133,23 @@ pub fn command(args: &Args) -> Result<i32> {
         _ => 3,
     };
     rows.sort_by_key(|r| order(r["kind"].as_str().unwrap_or("")));
-    let report = json!({"seats":seats,"rows":rows,"unaligned":unaligned,
-        "note":"按 path:line（路径后缀、行号±3）文本对齐，不做语义判断；未写位置的发现列在 unaligned。"});
+    let pending: Vec<Value> = rows
+        .iter()
+        .filter(|r| r["kind"] == "结论相反")
+        .map(|r| {
+            json!({"location":r["location"],"verdicts":r["verdicts"],"summary":r["summary"],
+                "verification":null,"result":null,"decided_by":null})
+        })
+        .collect();
+    if !pending.is_empty() {
+        eprintln!(
+            "{} 处结论相反：每处补一个可执行验证（测试、命令或复现）或交维护者裁决；不要把一方答案交给另一方再讨论。",
+            pending.len()
+        );
+    }
+    let report = json!({"seats":seats,"rows":rows,"unaligned":unaligned,"pending_verification":pending,
+        "note":"按 path:line（路径后缀、行号±3）文本对齐，不做语义判断；未写位置的发现列在 unaligned。",
+        "pending_rule":"结论相反的行不交模型讨论第二轮：宿主补可执行验证（测试、命令或复现）并记结果，或交维护者裁决。"});
     let text = if args.has("json") {
         serde_json::to_string_pretty(&report)?
     } else {
@@ -174,6 +193,32 @@ fn markdown(report: &Value) -> String {
             verdicts,
             row["summary"].as_str().unwrap().replace('|', "\\|")
         ));
+    }
+    let pending = report["pending_verification"].as_array().unwrap();
+    out.push_str("\n## 待执行验证（结论相反）\n\n");
+    if pending.is_empty() {
+        out.push_str("没有结论相反的位置。\n");
+    } else {
+        out.push_str(&format!(
+            "{}\n\n| # | 位置 | 各家结论 | 摘要 | 可执行验证（测试/命令/复现） | 结果或裁决 |\n|---|---|---|---|---|---|\n",
+            report["pending_rule"].as_str().unwrap()
+        ));
+        for (index, item) in pending.iter().enumerate() {
+            let verdicts = item["verdicts"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(seat, v)| format!("{seat}:{}", verdict(v)))
+                .collect::<Vec<_>>()
+                .join("；");
+            out.push_str(&format!(
+                "| {} | `{}` | {} | {} | 待补 | 待跑／交维护者裁决 |\n",
+                index + 1,
+                item["location"].as_str().unwrap(),
+                verdicts,
+                item["summary"].as_str().unwrap().replace('|', "\\|")
+            ));
+        }
     }
     let unaligned = report["unaligned"].as_array().unwrap();
     if !unaligned.is_empty() {

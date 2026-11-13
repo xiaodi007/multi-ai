@@ -241,7 +241,7 @@ fn help_app() -> Command {
         ("stats", "离线汇总本地运行记录；--json / --state-dir DIR"),
         (
             "consensus",
-            "离线对照多份复核报告：按 文件:行号 对齐，结论相反排最前；REPORT... [--out FILE] [--json]",
+            "离线对照多份复核报告：按 文件:行号 对齐，结论相反排最前并列出待执行验证清单；REPORT... [--out FILE] [--json]",
         ),
         (
             "scorecard",
