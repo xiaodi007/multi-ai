@@ -1,7 +1,7 @@
 # v0.2 委派：材料加工、调查与定向复核
 
 
-代码实施使用 `multi-ai delegate implement codex-cli --cwd ... --prompt-file ... --out ...`；写权限和 Git 保护见 [README 的受控实施](../README.md#受控实施)。下文介绍基于材料快照的调查、抽取和挑战。
+代码实施使用 `multi-ai delegate implement codex-cli --cwd ... --prompt-file ... --out ...`；写权限和 Git 保护见 [README 的受控实施](REFERENCE.md#受控实施)。下文介绍基于材料快照的调查、抽取和挑战。
 在主模型大量阅读前委派一个边界明确的任务。主模型先获取目标与少量入口信息，选择授权材料，收回短交接后核验关键证据并修改、测试。简单搜索与小改直接在宿主完成；默认最多两个独立任务并行。
 
 ## 最小调用

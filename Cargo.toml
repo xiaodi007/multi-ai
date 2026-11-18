@@ -3,6 +3,10 @@ name = "multi-ai"
 version = "0.2.2"
 edition = "2024"
 rust-version = "1.89"
+description = "Rust-native multi-model CLI: controlled, auditable cross-model review and delegation for coding agents"
+license = "MIT"
+repository = "https://github.com/xiaodi007/multi-ai"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1"

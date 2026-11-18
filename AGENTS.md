@@ -1,6 +1,6 @@
 # multi-ai 协作入口
 
-用中文沟通。先执行 `git status --short`，保留未知修改；阅读 README，再按需读取 `docs/COMPATIBILITY.md` 和 `docs/AGENT-INTEGRATION.md`。本仓库独立于业务项目，不导入其业务文件或凭据。
+用中文沟通。先执行 `git status --short`，保留未知修改；阅读 README 与 docs/REFERENCE.md，再按需读取 `docs/COMPATIBILITY.md` 和 `docs/AGENT-INTEGRATION.md`。本仓库独立于业务项目，不导入其业务文件或凭据。
 
 本工具共用 Rust 原生 API、CLI 调度、配置、输出生命周期和反馈实现；`ai-review` 与 `llm-run` 是兼容入口。修改时保留旧别名和输出语义，以及 run/review/verify 的秒单位、text/llm-run 的毫秒单位。模型展示与执行必须共用解析器。
 

@@ -19,7 +19,7 @@
 | `llm-run list-models` | `multi-ai text list-models` | 联网列 API 模型，凭据不展示 |
 | `llm-run codex/grok …` | 对应 `text` 子命令 | 直接交给可选厂商 CLI，保留 argv |
 
-旧 ai-review 路由名称为 `grok`、`codex`、`agy`、`kimi`、`kimi-k3`、`deepseek`、`glm`、`kimi-k3-api`、`claude-ds`。新路由名及对应额度池见 README。
+旧 ai-review 路由名称为 `grok`、`codex`、`agy`、`kimi`、`kimi-k3`、`deepseek`、`glm`、`kimi-k3-api`、`claude-ds`。新路由名及对应额度池见 [REFERENCE](REFERENCE.md#通路配置与凭据)。
 
 旧 llm-run 的 `kimi` 是 API 别名 `kimi-k3-high`，与旧 ai-review 的 `kimi` CLI 不同；旧 llm-run 的 `deepseek` 是 Flash，旧 ai-review 的 `deepseek` 是 Pro API。旧入口保留各自含义，新入口要求明确选择通路。
 
@@ -81,7 +81,7 @@ scorecard 的时间单位为秒、screen-min 为分钟，比率为 0～1；旧 t
 
 CLI 身份检查在 cwd 位于 HOME 内时，祖先配置发现到 HOME 为止；隔离 HOME 的确定性夹具不继承其外侧的宿主配置。显式配置路径仍参与身份指纹。
 
-成绩口径、低样本门槛和外包判据见 [README](../README.md#怎么选模型怎么给分)。
+成绩口径、低样本门槛和外包判据见 [README](REFERENCE.md#怎么选模型怎么给分)。
 
 ## 实施归因、反馈和重算增量（2026-10-21）
 
